@@ -3,6 +3,7 @@ import {
   defaultElectronExe,
   electronLandingDir,
   HELPER_STABLE_MS,
+  helperChildEnv,
   helperRunIsStable,
   resolveElectronPath,
   restartBackoffDelayMs,
@@ -62,6 +63,30 @@ describe('resolveElectronPath', () => {
     process.env.DSH_ELECTRON_PATH = '/definitely/missing-host-electron'
     process.env.DSH_NODE = '/also/missing/host-node'
     expect(resolveElectronPath()).toBeUndefined()
+  })
+})
+
+/**
+ * 子进程环境。
+ *
+ * dsh-tauri 桌面端把 `DSH_NODE` 指向随包 Electron 时**同时**注入
+ * `ELECTRON_RUN_AS_NODE=1`；该变量会沿 `process.env` 继承到桌宠窗口，让 Electron
+ * 以 Node 模式跑 `main.js`（没有 `app`，立刻崩溃并进入重启循环）。必须摘掉。
+ */
+describe('helper child environment', () => {
+  it('strips ELECTRON_RUN_AS_NODE inherited from the host', () => {
+    process.env.ELECTRON_RUN_AS_NODE = '1'
+    try {
+      expect(helperChildEnv({}).ELECTRON_RUN_AS_NODE).toBeUndefined()
+    }
+    finally {
+      delete process.env.ELECTRON_RUN_AS_NODE
+    }
+  })
+
+  it('applies caller-injected variables on top of the inherited env', () => {
+    const env = helperChildEnv({ DSH_PET_LITE_ORIGIN: 'http://127.0.0.1:3080' })
+    expect(env.DSH_PET_LITE_ORIGIN).toBe('http://127.0.0.1:3080')
   })
 })
 

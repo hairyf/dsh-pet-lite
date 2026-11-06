@@ -246,6 +246,23 @@ export interface HelperLogger {
 }
 
 /**
+ * 桌宠子进程的环境。
+ *
+ * 【必须摘掉 `ELECTRON_RUN_AS_NODE`】dsh-tauri 桌面端把 `DSH_NODE` 指向随包 Electron 时，
+ * **同时**注入了 `ELECTRON_RUN_AS_NODE=1`（它要用那个二进制跑 dsh 内核）。这个变量会沿
+ * `process.env` 继承到我们拉起的窗口 —— 于是 Electron 不进 Chromium、而是以 Node 模式
+ * 执行 `main.js`：`require('electron')` 返回路径字符串，`app` 是 `undefined`，进程立刻
+ * 崩掉并进入重启循环。桌宠窗口要的是 GUI，所以在这里显式删除。
+ *
+ * 同时把 `DSH_PET_LITE_*` 之外的调用方注入原样并上，保持其它行为不变。
+ */
+export function helperChildEnv(extra: Record<string, string | undefined> | undefined): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env }
+  delete env.ELECTRON_RUN_AS_NODE
+  return { ...env, ...extra }
+}
+
+/**
  * Electron 桌宠进程守护。
  *
  * 与 dsh-pet 的差异：本插件的桌宠窗口**不走** bridge 管道（不注册自定义 scheme、
@@ -279,7 +296,7 @@ export class HelperProcess {
     const launch = defaultLaunch(this.options)
     const child = spawn(launch.command, launch.args, {
       cwd: this.options.cwd || packageRoot,
-      env: { ...process.env, ...this.options.env },
+      env: helperChildEnv(this.options.env),
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       detached: false,
