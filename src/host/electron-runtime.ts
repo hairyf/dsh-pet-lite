@@ -35,7 +35,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 export const packageRoot = resolve(here, '..')
 
 /** 桌宠 Electron 主进程入口（`runtime/electron-helper/main.js`）。 */
-export const defaultHelperMain = resolve(packageRoot, 'runtime', 'electron-helper', 'main.js')
+export const defaultHelperMain = resolve(packageRoot, 'runtime', 'electron-helper', 'main.cjs')
 
 /** 当前平台标识（win32 / darwin / linux）。 */
 const PLAT = process.platform

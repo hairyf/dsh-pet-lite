@@ -5,8 +5,8 @@
 <h1 align='center'>dsh-pet-lite</h1>
 
 <p align='center'>
-轻量桌宠插件：把 Tauri 桌面端的 pet 功能抽离成独立插件 —— 设置页分区、会话活动驱动的动画、
-以及一个透明置顶的 Electron 桌宠窗口。
+轻量桌宠插件：把 Tauri 桌面端的 pet 功能抽离成独立插件 —— 设置页分区、会话活动驱动的动画，
+以及一个透明置顶的 Electron 桌宠窗口。**只做独立窗口，不做网页内宠物。**
 <br>
 <br>
 <a href="https://github.com/hairyf/dsh-pet-lite"><strong>Repository</strong></a>
@@ -27,6 +27,9 @@
   拖动时窗口跟随指针。
 - **渲染层复用同一组件** —— 窗口与 Tauri 桌面端使用**同一个** `dsh-pet-component`，
   因此动作池、点击反馈、气泡、镜像是同一套实现。
+- **拖动 / 甩抛手感逐字移植 dsh-pet** —— 屏幕坐标增量、5px 拖拽阈值、过阻尼弹簧跟随
+  （K=200/C=30）、150ms 轨迹估算初速、重力 1400 与撞边反弹 0.78、地面摩擦 2.5。
+  常量与公式一个字没改，改一个数手感就变了。
 
 ## 与 Tauri 桌面端的差异
 

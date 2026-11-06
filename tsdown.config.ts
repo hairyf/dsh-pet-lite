@@ -46,8 +46,6 @@ export default defineConfig([
     format: 'cjs',
     outExtensions: () => ({ js: '.cjs' }),
     define: { 'process.env.NODE_ENV': JSON.stringify('production') },
-    // 组件库必须内联：DSH 模块表不提供它（见上面的 externals 注释）。
-    noExternal: ['dsh-pet-component'],
     banner: `window.__ModuleLoader__.load({id:${id},factory:(require)=>{var module={exports:{}};var exports=module.exports;`,
     footer: 'return module.exports;}});',
     dts: false,

@@ -72,12 +72,16 @@ function createWindow() {
   const { workArea } = screen.getPrimaryDisplay()
   const { width, height } = windowSize(100)
 
+  // 初始落在主屏右下角（与上游默认 corner=bottom-right 一致）。
+  // 注意这是**窗口**左上角；渲染端拿到的是窗口内容区左上角，两者相差一个边框（无边框窗口为 0）。
+  const initialX = workArea.x + workArea.width - width - 24
+  const initialY = workArea.y + workArea.height - height - 24
+
   const created = new BrowserWindow({
     width,
     height,
-    // 初始落在主屏右下角（与上游默认 corner=bottom-right 一致）。
-    x: workArea.x + workArea.width - width - 24,
-    y: workArea.y + workArea.height - height - 24,
+    x: initialX,
+    y: initialY,
     show: false,
     useContentSize: true,
     transparent: true,
@@ -89,7 +93,7 @@ function createWindow() {
     // 需要可聚焦：右键菜单与气泡里的交互要用。
     focusable: true,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
@@ -121,11 +125,25 @@ function createWindow() {
   loaded(created)
 }
 
-/** 加载渲染端页面（本地文件 + 宿主地址作为查询参数）。 */
+/** 加载渲染端页面（本地文件 + 宿主地址 + 初始几何作为查询参数）。 */
 function loaded(target) {
+  // 渲染端不知道自己在屏幕哪里，也不知道工作区多大 —— 必须由主进程下发。
+  // dsh-pet 也走同一条路（它把 workArea / areas / primaryIndex 塞进查询串）。
+  // 否则渲染端只能猜，猜错的表现就是「一拖就跳左上角」或「只能在原地挪一小片」。
+  const bounds = target.getContentBounds()
+  const { workArea } = screen.getDisplayMatching(bounds)
   const query = new URLSearchParams({
     origin: ORIGIN,
     catalog: CATALOG_URL,
+    // 窗口内容区左上角（屏幕坐标，DIP）
+    winX: String(bounds.x),
+    winY: String(bounds.y),
+    // 工作区（屏幕坐标，DIP）：拖拽与抛掷的边界都按它算
+    areaX: String(workArea.x),
+    areaY: String(workArea.y),
+    areaWidth: String(workArea.width),
+    areaHeight: String(workArea.height),
+    margin: String(WINDOW_MARGIN),
   })
   target.loadFile(path.join(__dirname, 'renderer', 'index.html'), {
     query: Object.fromEntries(query),
@@ -165,6 +183,10 @@ ipcMain.on('pet:set-bounds', (event, bounds) => {
     return
   lastRequested.set(target.id, key)
   target.setContentBounds(rect, false)
+  // 诊断出口：验证脚本（scripts/verify-drag.mjs）据此确认窗口真的在动。
+  // 只在设了环境变量时打印，正常运行零噪音。
+  if (process.env.DSH_PET_LITE_TRACE_BOUNDS === '1')
+    process.stdout.write(`[bounds] ${key}\n`)
 })
 
 /** 渲染端在指针进/出宠物命中区时翻转可交互性。 */
@@ -173,6 +195,56 @@ ipcMain.on('pet:set-interactive', (event, interactive) => {
   if (!target || target.isDestroyed())
     return
   setWindowIgnore(target, !interactive)
+})
+
+// --- 拖拽期的主进程兜底 ------------------------------------------------
+//
+// 【为什么必须有】窗口只有宠物那么大（几百 px）。拖动时指针很快跑到窗口外，而整窗是
+// `setIgnoreMouseEvents(true, {forward: true})` 的 —— 一旦主进程把窗口翻回穿透，
+// 渲染端就收不到 `pointermove`/`pointerup`，弹簧目标卡在窗口边缘，
+// 表现就是「拖不出这一小片」「松手也停不下来」。
+//
+// dsh-pet 的对策是渲染端上报 `inputBusy`，并在主进程侧另有 60ms 光标轮询兜底
+// （`pointer-target.js` 的 `decideWindowIgnore`）。这里做同一件事：
+// 渲染端拖拽/飞行期间上报 `pet:set-dragging`，主进程据此**暂停**命中判定。
+let dragging = false
+
+ipcMain.on('pet:set-dragging', (event, value) => {
+  dragging = Boolean(value)
+  const target = BrowserWindow.fromWebContents(event.sender)
+  if (!target || target.isDestroyed())
+    return
+  if (dragging) {
+    // 拖拽开始：窗口必须可交互，否则接下来的 move/up 全部收不到。
+    setWindowIgnore(target, false)
+    return
+  }
+  // 拖拽结束：交还给命中判定（下一次 pointermove 会重新算）。
+  setWindowIgnore(target, true)
+})
+
+/**
+ * 拖拽期的窗口跟随：渲染端在拖动时把**屏幕坐标**目标位置发过来，主进程直接落窗。
+ *
+ * 这是「指针跑到窗口外也能继续拖」的关键 —— 不依赖窗口内事件流，主进程按收到的绝对
+ * 坐标设窗，指针在哪都能跟。
+ */
+ipcMain.on('pet:move-to', (event, position) => {
+  const target = BrowserWindow.fromWebContents(event.sender)
+  if (!target || target.isDestroyed())
+    return
+  const x = Number(position?.x)
+  const y = Number(position?.y)
+  if (!Number.isFinite(x) || !Number.isFinite(y))
+    return
+  const bounds = target.getContentBounds()
+  const key = `${Math.round(x)},${Math.round(y)},${bounds.width},${bounds.height}`
+  if (lastRequested.get(target.id) === key)
+    return
+  lastRequested.set(target.id, key)
+  target.setContentBounds({ x: Math.round(x), y: Math.round(y), width: bounds.width, height: bounds.height }, false)
+  if (process.env.DSH_PET_LITE_TRACE_BOUNDS === '1')
+    process.stdout.write(`[bounds] ${key}\n`)
 })
 
 /** 渲染端请求调整窗口大小（设置页改变 size 时）。 */

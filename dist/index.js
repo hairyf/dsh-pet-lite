@@ -35,7 +35,7 @@ const require = createRequire(import.meta.url);
 /** 包根：`dist/` 的上一级。 */
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /** 桌宠 Electron 主进程入口（`runtime/electron-helper/main.js`）。 */
-const defaultHelperMain = resolve(packageRoot, "runtime", "electron-helper", "main.js");
+const defaultHelperMain = resolve(packageRoot, "runtime", "electron-helper", "main.cjs");
 /** 当前平台标识（win32 / darwin / linux）。 */
 const PLAT = process.platform;
 /** 落地目录下可执行文件的相对路径（按平台）。 */

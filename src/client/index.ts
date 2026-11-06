@@ -2,7 +2,6 @@ import type { ClientAdapter, ClientContext } from './sdk'
 import { PLUGIN_ID } from '../shared/constants'
 import { PetSettings } from './components/pet-settings'
 import { locale } from './locales'
-import { petOverlayFeature } from './register/pet-overlay'
 import { petSectionFeature } from './register/pet-section'
 import { prefillFeature } from './register/prefill'
 import { settingsMenuFeature } from './register/settings-menu'
@@ -49,8 +48,6 @@ export function apply(ctx: ClientContext): void {
 
   ctx.effect(() => locale.attach(ctx.locale), `${PLUGIN_ID}: locale`)
   ctx.effect(() => petSectionFeature(ctx, adapter), `${PLUGIN_ID}: settings section`)
-  // 应用内浮层：浏览器里没有独立窗口，宠物挂在壳层的全屏浮层席位上。
-  ctx.effect(() => petOverlayFeature(ctx, adapter), `${PLUGIN_ID}: in-app overlay`)
   ctx.effect(() => settingsMenuFeature(ctx, adapter), `${PLUGIN_ID}: settings menu items`)
   ctx.effect(() => prefillFeature(ctx, adapter), `${PLUGIN_ID}: conversation prefill`)
 
