@@ -6,6 +6,10 @@ import { defineConfig } from 'tsdown'
 
 /**
  * 宿主 / 客户端 bundle 的 externals：这些由 DSH 运行时以 `require` 提供，不打包。
+ *
+ * 注意 `dsh-pet-component` **不在**这里：DSH 的客户端模块表既不是平台 seed word、
+ * 也不会为它生成 package factory，留作 external 会在浏览器里直接报
+ * `require("dsh-pet-component") missed the module table`。它必须被打进 client bundle。
  */
 export const dshExternal = [
   'react',
@@ -42,6 +46,8 @@ export default defineConfig([
     format: 'cjs',
     outExtensions: () => ({ js: '.cjs' }),
     define: { 'process.env.NODE_ENV': JSON.stringify('production') },
+    // 组件库必须内联：DSH 模块表不提供它（见上面的 externals 注释）。
+    noExternal: ['dsh-pet-component'],
     banner: `window.__ModuleLoader__.load({id:${id},factory:(require)=>{var module={exports:{}};var exports=module.exports;`,
     footer: 'return module.exports;}});',
     dts: false,

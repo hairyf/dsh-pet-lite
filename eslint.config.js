@@ -14,6 +14,8 @@ export default antfu({
   ignores: [
     'source/**',
     'dist/**',
+    // 临时的截图 / 诊断脚本（.tmp-* 均为本地工作目录，不入库）
+    '.tmp-*/**',
     'runtime/electron-helper/renderer/renderer.js',
     '**/*.tgz',
   ],

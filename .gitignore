@@ -15,3 +15,6 @@ temp
 !**/skills/*/
 !**/skills/*/**
 **/skills/npm-*
+
+# 本地截图 / 诊断工作目录（.tmp-* 不入库）
+.tmp-*/
