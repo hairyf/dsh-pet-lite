@@ -35,20 +35,32 @@ export { useSyncExternalStore }
  */
 interface InvokeSpec {
   path: string
-  method: 'GET' | 'PUT'
+  method: 'GET' | 'PUT' | 'POST' | 'DELETE'
 }
 
 const INVOKE: Record<string, InvokeSpec> = {
   get_pet_status: { path: '/settings', method: 'GET' },
   list_pet_catalog: { path: '/catalog', method: 'GET' },
+  list_preset_pets: { path: '/catalog', method: 'GET' },
   set_pet_enabled: { path: '/settings', method: 'PUT' },
   set_active_pet: { path: '/settings', method: 'PUT' },
   set_pet_size: { path: '/settings', method: 'PUT' },
   set_pet_throw_enabled: { path: '/settings', method: 'PUT' },
   get_pet_asset: { path: '/asset', method: 'GET' },
+  list_pets: { path: '/pets', method: 'GET' },
+  import_pet: { path: '/import', method: 'POST' },
+  delete_pet: { path: '/pet', method: 'DELETE' },
+  import_pet_repository: { path: '/repository', method: 'POST' },
+  update_pet_repository: { path: '/repository', method: 'PUT' },
+  delete_pet_repository: { path: '/repository', method: 'DELETE' },
+  check_pet_updates: { path: '/updates', method: 'GET' },
+  open_external_url: { path: '/open-external', method: 'POST' },
+  get_pet_overlay_supported: { path: '/unsupported', method: 'GET' },
+  get_force_xwayland: { path: '/unsupported', method: 'GET' },
+  set_force_xwayland: { path: '/unsupported', method: 'GET' },
 }
 
-/** PUT 请求体：只映射设置类命令。 */
+/** PUT/POST 请求体：命令 → 载荷字段。 */
 function bodyFor(command: string, args: Record<string, unknown> | undefined): unknown {
   if (!args)
     return {}
@@ -61,16 +73,36 @@ function bodyFor(command: string, args: Record<string, unknown> | undefined): un
       return { pet_size: args.size }
     case 'set_pet_throw_enabled':
       return { throw_enabled: args.enabled }
+    case 'import_pet':
+      return { name: args.name, data: args.data }
+    case 'import_pet_repository':
+      return { repository: args.repository }
+    case 'update_pet_repository':
+      return { id: args.id }
+    case 'open_external_url':
+      return { url: args.url }
     default:
       return {}
   }
 }
 
-/** GET 查询串（目前只有素材解析带参数）。 */
+/** GET / DELETE 查询串。 */
 function queryFor(command: string, args: Record<string, unknown> | undefined): string {
-  if (command === 'get_pet_asset' && args && typeof args.id === 'string')
-    return `?id=${encodeURIComponent(args.id)}`
-  return ''
+  if (!args)
+    return ''
+  const id = typeof args.id === 'string' ? String(args.id) : undefined
+  switch (command) {
+    case 'get_pet_asset':
+      return id ? `?id=${encodeURIComponent(id)}` : ''
+    case 'list_pets':
+      return typeof args.source === 'string' ? `?source=${encodeURIComponent(String(args.source))}` : ''
+    case 'delete_pet':
+      return id ? `?id=${encodeURIComponent(id)}` : ''
+    case 'delete_pet_repository':
+      return id ? `?id=${encodeURIComponent(id)}` : ''
+    default:
+      return ''
+  }
 }
 
 /**
@@ -84,16 +116,30 @@ export async function invoke<T>(command: string, args?: Record<string, unknown>)
   if (!spec)
     throw new Error(`PET_UNSUPPORTED_COMMAND: ${command}`)
 
-  const url = `${ROUTE_PREFIX}${spec.path}${spec.method === 'GET' ? queryFor(command, args) : ''}`
+  // 占位端点（本插件不支持的宿主能力）：明确报错，而不是把 404 当数据。
+  if (spec.path === '/unsupported')
+    throw new Error(`PET_UNSUPPORTED_COMMAND: ${command}`)
+
+  const hasBody = spec.method === 'PUT' || spec.method === 'POST'
+  const url = `${ROUTE_PREFIX}${spec.path}${spec.method === 'GET' || spec.method === 'DELETE' ? queryFor(command, args) : ''}`
   const response = await fetch(url, {
     method: spec.method,
-    headers: spec.method === 'PUT' ? { 'content-type': 'application/json' } : undefined,
-    body: spec.method === 'PUT' ? JSON.stringify(bodyFor(command, args)) : undefined,
+    headers: hasBody ? { 'content-type': 'application/json' } : undefined,
+    body: hasBody ? JSON.stringify(bodyFor(command, args)) : undefined,
     cache: 'no-store',
   })
   if (!response.ok) {
     const text = await response.text().catch(() => '')
     throw new Error(text.trim() || `PET_REQUEST_FAILED: ${command} (${response.status})`)
+  }
+  // 外链：宿主只校验地址；真正打开由这里触发（浏览器/桌宠窗口内都可用）。
+  if (command === 'open_external_url' && args && typeof args.url === 'string') {
+    try {
+      window.open(args.url, '_blank', 'noopener,noreferrer')
+    }
+    catch {
+      /* 弹窗被拦截：宿主校验已通过，吞掉打开失败即可 */
+    }
   }
   if (response.status === 204)
     return undefined as T

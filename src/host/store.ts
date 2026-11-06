@@ -1,5 +1,5 @@
-import type { PetRuntimeStatus, PetStatus } from '../shared/types'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import type { PetRuntimeStatus, PetStatus, PresetPetItem } from '../shared/types'
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
@@ -117,6 +117,64 @@ export function update(patch: Partial<PetPersisted>): PetPersisted {
 /** 测试用：丢弃内存态，强制下次从磁盘重读。 */
 export function resetCache(): void {
   current = undefined
+}
+
+// --- 远端登记目录 -------------------------------------------------------
+//
+// 用户在设置页登记的 GitHub 仓库宠物。与上游一样只持久化**资源地址与元信息**
+// （不下载视频包），落盘在 `$DSH_HOME/pet-lite/pet.json` 的同目录 `remote-pets.json`。
+
+function remoteFile(): string {
+  return join(dshHome(), 'pet-lite', 'remote-pets.json')
+}
+
+let remoteCache: PresetPetItem[] | undefined
+/** 缓存对应文件的 mtime（ms）；文件被外部改动时缓存自动失效。 */
+let remoteCacheMtime = -1
+
+/** 读远端登记目录（损坏时回落到空数组）。 */
+export function readRemotePets(): PresetPetItem[] {
+  const file = remoteFile()
+  const exists = existsSync(file)
+  const mtime = exists ? statSync(file).mtimeMs : 0
+  if (remoteCache !== undefined && mtime === remoteCacheMtime)
+    return remoteCache
+  if (!exists) {
+    remoteCache = []
+    remoteCacheMtime = 0
+    return remoteCache
+  }
+  try {
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as PresetPetItem[]
+    remoteCache = Array.isArray(raw) ? raw : []
+  }
+  catch {
+    remoteCache = []
+  }
+  remoteCacheMtime = mtime
+  return remoteCache
+}
+
+/** 原子写远端登记目录。 */
+export function writeRemotePets(list: PresetPetItem[]): void {
+  const file = remoteFile()
+  remoteCache = list
+  try {
+    mkdirSync(join(dshHome(), 'pet-lite'), { recursive: true })
+    const tmp = `${file}.tmp`
+    writeFileSync(tmp, JSON.stringify(list, null, 2), 'utf8')
+    renameSync(tmp, file)
+    remoteCacheMtime = statSync(file).mtimeMs
+  }
+  catch {
+    /* 写盘失败不改变内存态：下次写会再试 */
+  }
+}
+
+/** 测试用：丢弃远端目录缓存。 */
+export function resetRemoteCache(): void {
+  remoteCache = undefined
+  remoteCacheMtime = -1
 }
 
 /**

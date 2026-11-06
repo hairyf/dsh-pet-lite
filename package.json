@@ -82,6 +82,7 @@
     "dsh-taiwind": "catalog:utils",
     "dsh-tauri": "catalog:",
     "dsh-tauri-ui": "catalog:",
+    "fflate": "catalog:",
     "h3": "catalog:utils"
   },
   "devDependencies": {

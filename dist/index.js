@@ -1,13 +1,15 @@
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import "@electron-internal/extract-zip";
 import "@electron/get";
 import { Buffer } from "node:buffer";
 import { homedir } from "node:os";
+import { readFile } from "node:fs/promises";
+import { unzipSync } from "fflate";
 //#region src/host/electron-runtime.ts
 /**
 * host/electron-runtime.ts — Electron 可执行文件解析与桌宠进程守护。
@@ -277,6 +279,140 @@ const CATALOG_PATH = "/catalog";
 /** SSE 心跳注释帧间隔（毫秒）。 */
 const SSE_KEEPALIVE_MS = 15e3;
 //#endregion
+//#region src/host/store.ts
+/** `$DSH_HOME`（默认 `~/.dsh`），与 DSH 其余工具链一致。 */
+function dshHome() {
+	const configured = process.env.DSH_HOME?.trim();
+	if (!configured) return join(homedir(), ".dsh");
+	return configured === "~" ? homedir() : configured;
+}
+function storeFile() {
+	return join(dshHome(), "pet-lite", "pet.json");
+}
+function clampSize(value) {
+	const size = typeof value === "number" ? value : Number(value);
+	if (!Number.isFinite(size)) return 100;
+	return Math.round(Math.min(200, Math.max(50, size)));
+}
+/** 未知 id 收敛为首个内置预设（与 Rust `resolve_active_pet` 的兜底同义）。 */
+function normalizeActiveId(value) {
+	const id = typeof value === "string" ? value.trim() : "";
+	if (!id) return "";
+	return builtInCatalog().some((item) => item.id === id) ? id : id;
+}
+function defaults() {
+	return {
+		active_pet: builtInCatalog()[0]?.id ?? "",
+		enabled: false,
+		pet_size: 100,
+		throw_enabled: false
+	};
+}
+/** 读取持久设置；文件缺失或损坏时回落到默认值。 */
+function readPersisted() {
+	const file = storeFile();
+	if (!existsSync(file)) return defaults();
+	try {
+		const raw = JSON.parse(readFileSync(file, "utf8"));
+		const fallback = defaults();
+		return {
+			active_pet: raw.active_pet === void 0 ? fallback.active_pet : normalizeActiveId(raw.active_pet),
+			enabled: typeof raw.enabled === "boolean" ? raw.enabled : fallback.enabled,
+			pet_size: clampSize(raw.pet_size),
+			throw_enabled: typeof raw.throw_enabled === "boolean" ? raw.throw_enabled : fallback.throw_enabled
+		};
+	} catch {
+		return defaults();
+	}
+}
+/** 原子写盘（临时文件 + rename）；失败只返回 false，调用方保持内存态。 */
+function writePersisted(value) {
+	const file = storeFile();
+	try {
+		mkdirSync(join(dshHome(), "pet-lite"), { recursive: true });
+		const tmp = `${file}.tmp`;
+		writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8");
+		renameSync(tmp, file);
+		return true;
+	} catch {
+		return false;
+	}
+}
+/** 内存态：进程内唯一真值，落盘失败也不回滚（下次写入会再试）。 */
+let current;
+function state() {
+	if (current === void 0) current = readPersisted();
+	return current;
+}
+/** 更新内存态并落盘；返回更新后的快照。 */
+function update(patch) {
+	const base = state();
+	const next = {
+		active_pet: patch.active_pet === void 0 ? base.active_pet : normalizeActiveId(patch.active_pet),
+		enabled: patch.enabled === void 0 ? base.enabled : patch.enabled,
+		pet_size: patch.pet_size === void 0 ? base.pet_size : clampSize(patch.pet_size),
+		throw_enabled: patch.throw_enabled === void 0 ? base.throw_enabled : patch.throw_enabled
+	};
+	current = next;
+	writePersisted(next);
+	return next;
+}
+function remoteFile() {
+	return join(dshHome(), "pet-lite", "remote-pets.json");
+}
+let remoteCache;
+/** 缓存对应文件的 mtime（ms）；文件被外部改动时缓存自动失效。 */
+let remoteCacheMtime = -1;
+/** 读远端登记目录（损坏时回落到空数组）。 */
+function readRemotePets() {
+	const file = remoteFile();
+	const exists = existsSync(file);
+	const mtime = exists ? statSync(file).mtimeMs : 0;
+	if (remoteCache !== void 0 && mtime === remoteCacheMtime) return remoteCache;
+	if (!exists) {
+		remoteCache = [];
+		remoteCacheMtime = 0;
+		return remoteCache;
+	}
+	try {
+		const raw = JSON.parse(readFileSync(file, "utf8"));
+		remoteCache = Array.isArray(raw) ? raw : [];
+	} catch {
+		remoteCache = [];
+	}
+	remoteCacheMtime = mtime;
+	return remoteCache;
+}
+/** 原子写远端登记目录。 */
+function writeRemotePets(list) {
+	const file = remoteFile();
+	remoteCache = list;
+	try {
+		mkdirSync(join(dshHome(), "pet-lite"), { recursive: true });
+		const tmp = `${file}.tmp`;
+		writeFileSync(tmp, JSON.stringify(list, null, 2), "utf8");
+		renameSync(tmp, file);
+		remoteCacheMtime = statSync(file).mtimeMs;
+	} catch {}
+}
+/**
+* 推导对外快照（对应 Rust `PetStatus`）。
+*
+* `visible` 不是持久字段：无选择时必然不可见（没有内容可渲染，不留空窗口）。
+*/
+function snapshot(input) {
+	const value = state();
+	return {
+		active_pet: value.active_pet,
+		enabled: value.enabled,
+		pet_size: value.pet_size,
+		throw_enabled: value.throw_enabled,
+		visible: value.enabled && value.active_pet !== "",
+		desktop_supported: input.desktopSupported,
+		desktop_open: input.desktopOpen
+	};
+}
+//#endregion
 //#region src/host/catalog.ts
 const BUILT_IN = readBuiltIn();
 function readBuiltIn() {
@@ -308,13 +444,59 @@ function toItem(spec, remote) {
 	};
 }
 /** 合并内置与登记条目（内置在前；id 撞车时丢弃登记条目）。 */
-function mergeCatalog(remote = []) {
+function mergeCatalog(remote = readRemotePets()) {
 	const builtInIds = new Set(BUILT_IN.map((spec) => spec.id));
-	return [...BUILT_IN.map((spec) => toItem(spec, false)), ...remote.filter((spec) => !builtInIds.has(spec.id)).map((spec) => toItem(spec, true))];
+	return [...BUILT_IN.map((spec) => toItem(spec, false)), ...remote.filter((spec) => !builtInIds.has(spec.id)).map((spec) => spec.remote === false ? {
+		...spec,
+		remote: true
+	} : spec)];
 }
 /** 内置条目（不含用户登记）。 */
 function builtInCatalog() {
 	return mergeCatalog([]);
+}
+/** 完整目录（内置 + 登记）。 */
+function fullCatalog() {
+	return mergeCatalog(readRemotePets());
+}
+/** 是否已登记该远端 id。 */
+function isRegistered(id) {
+	return readRemotePets().some((item) => item.id === id);
+}
+/** 登记一个远端仓库宠物（内置 id 与重复 id 拒绝）。 */
+function registerRemotePet(spec) {
+	const current = readRemotePets();
+	if (BUILT_IN.some((item) => item.id === spec.id)) throw new Error(`PET_ALREADY_EXISTS: preset ${spec.id} is built in`);
+	if (current.some((item) => item.id === spec.id || item.config === spec.config)) throw new Error(`PET_ALREADY_EXISTS: preset ${spec.id} is already registered`);
+	writeRemotePets([...current, {
+		...spec,
+		remote: true
+	}]);
+	return {
+		...spec,
+		remote: true
+	};
+}
+/** 覆写一个已登记条目（用于更新）。 */
+function replaceRemotePet(spec) {
+	const current = readRemotePets();
+	const index = current.findIndex((item) => item.id === spec.id);
+	if (index < 0) throw new Error(`PET_NOT_FOUND: preset ${spec.id} is not registered`);
+	const next = current.slice();
+	next[index] = {
+		...spec,
+		remote: true
+	};
+	writeRemotePets(next);
+	return {
+		...spec,
+		remote: true
+	};
+}
+/** 反注册一个远端条目。 */
+function unregisterRemotePet(id) {
+	if (!isRegistered(id)) throw new Error(`PET_NOT_FOUND: preset ${id} is not registered`);
+	writeRemotePets(readRemotePets().filter((item) => item.id !== id));
 }
 /**
 * 把预设条目投影成桌宠窗口的渲染参数（对应 Rust `get_pet_asset`）。
@@ -341,6 +523,621 @@ function presetAsset(item) {
 		},
 		size: item.size ?? void 0
 	};
+}
+const PET_SPRITESHEET_MAX_BYTES = 16 * 1024 * 1024;
+const PET_PREVIEW_MAX_DIMENSION = 4096;
+const PET_SPRITE_COLUMNS = 8;
+/** 来源目录。 */
+function petsDir(source) {
+	if (source === "chat") return join(dshHome(), "pets");
+	return join(homedir(), ".codex", "pets");
+}
+/** 来源限定 id。 */
+function qualifiedId(source, manifestId) {
+	return `${source}:${manifestId}`;
+}
+/** 解析来源限定 id（`chat:` / `codex:` 前缀）。 */
+function parseQualifiedId(id) {
+	const index = id.indexOf(":");
+	if (index < 0) throw new Error("PET_ID_INVALID: filesystem pet id must be source-qualified");
+	const source = id.slice(0, index);
+	if (source !== "chat" && source !== "codex") throw new Error("PET_SOURCE_INVALID: source must be chat or codex");
+	const manifestId = id.slice(index + 1);
+	validateManifestId(manifestId);
+	return {
+		source,
+		manifestId
+	};
+}
+/** 清单 id 只允许 1..=64 的 ASCII 字母数字与 `-`/`_`（直接进文件系统路径）。 */
+function validManifestId(id) {
+	return id.length > 0 && id.length <= 64 && /^[\w-]+$/u.test(id) && [...id].every((ch) => ch.charCodeAt(0) < 128);
+}
+function validateManifestId(id) {
+	if (!validManifestId(id)) throw new Error("PET_ID_INVALID: manifest id must be 1..=64 ascii letters/digits/-/_");
+}
+/**
+* 只允许普通相对路径组件（对应 Rust `safe_relative_path`）。
+*
+* 显式拒绝反斜杠与冒号：Unix 上算安全的路径，在 Windows 上是目录分隔符或盘符 / ADS。
+*/
+function safeRelativePath(value) {
+	if (!value || value.includes("\0") || value.includes("\\") || value.includes(":")) throw new Error("PET_PATH_INVALID: path must be a portable relative path");
+	const segments = value.split("/");
+	const out = [];
+	for (const segment of segments) {
+		if (segment === "" || segment === ".") continue;
+		if (segment === "..") throw new Error("PET_PATH_INVALID: path must not escape the pet directory");
+		out.push(segment);
+	}
+	if (out.length === 0) throw new Error("PET_PATH_INVALID: path must not be empty");
+	return out.join("/");
+}
+/** 解析 `pet.json`（受支持字段，未知字段忽略）。 */
+function parseManifest(raw) {
+	const value = JSON.parse(raw);
+	if (value === null || typeof value !== "object") throw new Error("PET_MANIFEST_INVALID: manifest must be an object");
+	const id = typeof value.id === "string" ? value.id : "";
+	validateManifestId(id);
+	const str = (key) => typeof value[key] === "string" ? value[key] : void 0;
+	const num = (key) => typeof value[key] === "number" ? value[key] : void 0;
+	let ext;
+	if (value.ext && typeof value.ext === "object") {
+		const e = value.ext;
+		if (typeof e.default === "string") ext = {
+			default: e.default,
+			mac: typeof e.mac === "string" ? e.mac : void 0
+		};
+	}
+	return {
+		id,
+		displayName: str("displayName"),
+		description: str("description"),
+		spriteVersionNumber: num("spriteVersionNumber"),
+		spritesheetPath: str("spritesheetPath"),
+		kind: str("kind"),
+		configPath: str("configPath"),
+		uriPath: str("uriPath"),
+		macUriPath: str("macUriPath"),
+		previewPath: str("previewPath"),
+		ext,
+		size: num("size")
+	};
+}
+/** 读取目录下的 `pet.json`；失败抛错（调用方按「坏宠物」忽略）。 */
+function readManifest(directory) {
+	const file = join(directory, "pet.json");
+	if (statSync(file).size > 65536) throw new Error("PET_MANIFEST_READ_FAILED: pet.json exceeds its byte limit");
+	return parseManifest(readFileSync(file, "utf8"));
+}
+/** 来源目录下的立即子目录（忽略符号链接）。对应 Rust `immediate_pet_directories`。 */
+function immediatePetDirectories(root) {
+	if (!existsSync(root)) return [];
+	const directories = [];
+	for (const entry of readdirSync(root, { withFileTypes: true })) if (entry.isDirectory() && !entry.isSymbolicLink()) directories.push(join(root, entry.name));
+	return directories.sort();
+}
+/** Codex 图集网格（列恒 8；v1=9 行 / v2=11 行）。 */
+function spriteGrid(declared, width, height) {
+	if (width % PET_SPRITE_COLUMNS !== 0) throw new Error(`PET_ASSET_DIMENSIONS_INVALID: spritesheet width must be divisible by ${PET_SPRITE_COLUMNS} columns`);
+	const cell = width / PET_SPRITE_COLUMNS;
+	if (cell === 0 || height % cell !== 0) throw new Error("PET_ASSET_DIMENSIONS_INVALID: spritesheet height must be a multiple of the cell size");
+	const rows = height / cell;
+	return {
+		version: rows === 9 ? 1 : 2,
+		columns: PET_SPRITE_COLUMNS,
+		rows
+	};
+}
+/** 读图集尺寸（PNG / WebP 头解析，足够推断网格）。 */
+function imageSize(bytes) {
+	if (bytes.length >= 24 && bytes[0] === 137 && bytes[1] === 80) return {
+		width: bytes.readUInt32BE(16),
+		height: bytes.readUInt32BE(20)
+	};
+	if (bytes.length >= 30 && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP") {
+		const fourcc = bytes.toString("ascii", 12, 16);
+		if (fourcc === "VP8X") return {
+			width: 1 + (bytes[24] | bytes[25] << 8 | bytes[26] << 16),
+			height: 1 + (bytes[27] | bytes[28] << 8 | bytes[29] << 16)
+		};
+		if (fourcc === "VP8 ") return {
+			width: bytes.readUInt16LE(26) & 16383,
+			height: bytes.readUInt16LE(28) & 16383
+		};
+	}
+	return null;
+}
+/** 把图集读成 data URL（对应 Rust `read_spritesheet` 的 data URL 输出）。 */
+async function readSpritesheet(directory, relative, declared) {
+	const bytes = await readFile(containedFile(directory, relative));
+	if (bytes.length > PET_SPRITESHEET_MAX_BYTES) throw new Error("PET_ASSET_READ_FAILED: spritesheet exceeds its byte limit");
+	const size = imageSize(bytes);
+	if (!size) throw new Error("PET_ASSET_INVALID: spritesheet must be PNG or WebP");
+	const grid = spriteGrid(declared, size.width, size.height);
+	return {
+		url: `data:${bytes[0] === 137 ? "image/png" : "image/webp"};base64,${bytes.toString("base64")}`,
+		grid
+	};
+}
+/** GIF 预览图 → data URL（对应 Rust `gif_data_url`）。 */
+function gifDataUrl(directory, relative) {
+	const bytes = readFileSync(containedFile(directory, relative));
+	if (bytes.length < 13 || bytes.toString("ascii", 0, 6) !== "GIF87a" && bytes.toString("ascii", 0, 6) !== "GIF89a") throw new Error("PET_PREVIEW_INVALID: preview must have a GIF header");
+	const width = bytes.readUInt16LE(6);
+	const height = bytes.readUInt16LE(8);
+	if (width === 0 || width !== height || width > PET_PREVIEW_MAX_DIMENSION) throw new Error("PET_PREVIEW_INVALID: GIF must be square and within 1..=4096px");
+	return `data:image/gif;base64,${bytes.toString("base64")}`;
+}
+/** 跟随符号链接后仍必须留在宠物目录内（对应 Rust `contained_file`）。 */
+function containedFile(directory, relative) {
+	const normalized = safeRelativePath(relative);
+	const root = resolve(directory);
+	const candidate = resolve(directory, normalized);
+	if (candidate !== root && !candidate.startsWith(root + sep)) throw new Error("PET_PATH_INVALID: path escapes the pet directory");
+	return candidate;
+}
+/** 校验来源：Codex 宠物必须是图集（禁止 kind=dsh）。 */
+function validatePetSource(source, manifest) {
+	if (source === "codex" && manifest.kind === "dsh") throw new Error("PET_KIND_FORBIDDEN: Codex pets must use spritesheets");
+}
+/** 清单 → 列表项（对应 Rust `manifest_to_list_item`）。 */
+async function manifestToListItem(source, directory, manifest) {
+	const name = (manifest.displayName ?? "").trim() || manifest.id;
+	const description = (manifest.description ?? "").trim() || void 0;
+	const isDsh = manifest.kind === "dsh";
+	let thumbnail;
+	try {
+		thumbnail = isDsh ? gifDataUrl(directory, manifest.previewPath ?? "") : (await readSpritesheet(directory, manifest.spritesheetPath ?? "", manifest.spriteVersionNumber)).url;
+	} catch {
+		thumbnail = void 0;
+	}
+	return {
+		id: qualifiedId(source, manifest.id),
+		name,
+		description,
+		thumbnail,
+		source,
+		kind: isDsh ? "dsh" : "codex",
+		thumbnail_type: isDsh ? "gif" : "spritesheet"
+	};
+}
+/** 列出某来源目录下全部有效宠物（坏宠物忽略）。对应 Rust `list_pets`。 */
+async function listPets(source) {
+	const root = petsDir(source);
+	const items = [];
+	const ids = /* @__PURE__ */ new Set();
+	for (const directory of immediatePetDirectories(root)) {
+		let manifest;
+		try {
+			manifest = readManifest(directory);
+		} catch {
+			continue;
+		}
+		try {
+			validatePetSource(source, manifest);
+		} catch {
+			continue;
+		}
+		const id = qualifiedId(source, manifest.id);
+		if (ids.has(id)) continue;
+		ids.add(id);
+		items.push(await manifestToListItem(source, directory, manifest));
+	}
+	items.sort((left, right) => left.id.localeCompare(right.id));
+	return items;
+}
+/** 按清单 id 找宠物目录（对应 Rust `find_pet_directory`）。 */
+function findPetDirectory(root, manifestId) {
+	for (const directory of immediatePetDirectories(root)) {
+		let manifest;
+		try {
+			manifest = readManifest(directory);
+		} catch {
+			continue;
+		}
+		if (manifest.id === manifestId) return {
+			directory,
+			manifest
+		};
+	}
+}
+//#endregion
+//#region src/host/pet-import.ts
+/**
+* host/pet-import.ts — Codex 宠物 zip 包导入（对应 Rust `bridge/pet.rs` 的
+* `extract_pet_archive` + `import_pet`）。
+*
+* 与上游一致的安全约束：
+*   - base64 载荷 ≤ 32MB；条目数 ≤ 512；解压后总量 ≤ 128MB；
+*   - 条目路径必须是可移植相对路径（拒绝 `\`、`:`、`..` 逃逸、绝对路径、NUL）；
+*   - 忽略 OS 元数据（`__MACOSX`、`._*`、`.DS_Store`、`Thumbs.db`、`desktop.ini`、`.staging`）；
+*   - 恰好一个 `pet.json`，其所在目录即包根，剥离包装目录后全部条目必须落在包根内；
+*   - 清单 id 合法、kind 非 dsh、图集为 PNG/WebP 且尺寸可推断网格；
+*   - 目标 id 已存在则拒绝（不覆盖）。
+*/
+const PET_PACKAGE_MAX_BYTES = 32 * 1024 * 1024;
+const PET_PACKAGE_MAX_ENTRIES = 512;
+const PET_PACKAGE_MAX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024;
+/** 归档里与宠物无关的条目。 */
+function ignoredArchiveEntry(name) {
+	return name.split("/").some((segment) => segment === "__MACOSX" || segment === ".DS_Store" || segment === "Thumbs.db" || segment === "desktop.ini" || segment === ".staging" || segment.startsWith("._"));
+}
+/** 定位归档里唯一的 `pet.json`，返回需要剥离的前缀（`''` = 清单就在归档根）。 */
+function archiveRootPrefix(entries) {
+	const manifests = entries.filter((entry) => !entry.isDir && entry.name.split("/").pop() === "pet.json");
+	if (manifests.length !== 1) throw new Error("PET_ARCHIVE_LAYOUT_INVALID: archive must contain exactly one pet.json");
+	const manifestPath = manifests[0].name;
+	const slash = manifestPath.lastIndexOf("/");
+	const prefix = slash < 0 ? "" : manifestPath.slice(0, slash + 1);
+	if (prefix === "") return "";
+	for (const entry of entries) {
+		if (entry.name.startsWith(prefix)) continue;
+		if (entry.isDir && prefix.startsWith(`${entry.name}/`)) continue;
+		throw new Error("PET_ARCHIVE_LAYOUT_INVALID: archive must have exactly one supported root");
+	}
+	return prefix;
+}
+function uniqueStagingPath(root) {
+	return join(root, ".staging", `import-${`${Date.now()}-${process.pid}-${Math.floor(Math.random() * 1e9)}`}`);
+}
+/**
+* 导入一个 Codex 宠物 zip（base64）。返回安装后的列表项。
+*
+* @param base64 - 前端 FileReader 读出的 base64（不含 `data:` 前缀）。
+*/
+async function importPetArchive(base64, source = "codex") {
+	const encodedLimit = Math.ceil(PET_PACKAGE_MAX_BYTES / 3) * 4;
+	if (base64.length > encodedLimit) throw new Error(`PET_PACKAGE_TOO_LARGE: pet package must not exceed ${PET_PACKAGE_MAX_BYTES} compressed bytes`);
+	const bytes = Buffer.from(base64, "base64");
+	if (bytes.length > PET_PACKAGE_MAX_BYTES) throw new Error(`PET_PACKAGE_TOO_LARGE: pet package must not exceed ${PET_PACKAGE_MAX_BYTES} compressed bytes`);
+	let raw;
+	try {
+		raw = unzipSync(new Uint8Array(bytes));
+	} catch (error) {
+		throw new Error(`PET_ARCHIVE_INVALID: failed to open zip: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	const entries = [];
+	let total = 0;
+	const names = Object.keys(raw);
+	if (names.length === 0 || names.length > PET_PACKAGE_MAX_ENTRIES) throw new Error(`PET_ARCHIVE_ENTRY_LIMIT: archive must contain 1..=${PET_PACKAGE_MAX_ENTRIES} entries`);
+	for (const name of names) {
+		const isDir = name.endsWith("/");
+		if (ignoredArchiveEntry(name)) continue;
+		safeRelativePath(name.replace(/\/+$/u, ""));
+		const data = raw[name];
+		if (!isDir) {
+			total += data.length;
+			if (total > PET_PACKAGE_MAX_UNCOMPRESSED_BYTES) throw new Error(`PET_ARCHIVE_TOO_LARGE: uncompressed files must not exceed ${PET_PACKAGE_MAX_UNCOMPRESSED_BYTES} bytes`);
+		}
+		entries.push({
+			name,
+			data,
+			isDir
+		});
+	}
+	const prefix = archiveRootPrefix(entries);
+	const root = petsDir(source);
+	const staging = uniqueStagingPath(root);
+	mkdirSync(staging, { recursive: true });
+	let committed = false;
+	try {
+		const outputs = /* @__PURE__ */ new Set();
+		for (const entry of entries) {
+			const relative = entry.name.startsWith(prefix) ? entry.name.slice(prefix.length) : "";
+			if (relative === "" || relative.endsWith("/")) continue;
+			const normalized = safeRelativePath(relative);
+			if (outputs.has(normalized)) throw new Error("PET_ARCHIVE_DUPLICATE_ENTRY: duplicate output path");
+			outputs.add(normalized);
+			const target = join(staging, normalized);
+			mkdirSync(join(target, ".."), { recursive: true });
+			writeFileSync(target, entry.data);
+		}
+		const manifest = parseManifest(readFileSync(join(staging, "pet.json"), "utf8"));
+		validateManifestId(manifest.id);
+		if (manifest.kind === "dsh") throw new Error("PET_KIND_FORBIDDEN: Codex pets must use spritesheets");
+		await readSpritesheet(staging, manifest.spritesheetPath ?? "", manifest.spriteVersionNumber);
+		const target = join(root, manifest.id);
+		if (existsSync(target)) throw new Error(`PET_ALREADY_IMPORTED: Codex pet target ${manifest.id} already exists`);
+		mkdirSync(root, { recursive: true });
+		renameSync(staging, target);
+		committed = true;
+		return await manifestToListItem(source, target, manifest);
+	} finally {
+		if (!committed) rmSync(staging, {
+			recursive: true,
+			force: true
+		});
+	}
+}
+//#endregion
+//#region src/host/pet-repo.ts
+/**
+* host/pet-repo.ts — 远端 GitHub 仓库宠物登记（对应 Rust `bridge/pet.rs` 的
+* `import_pet_repository` / `check_pet_updates` / `update_pet_repository` 及其辅助函数）。
+*
+* 只登记**远端资源地址**，不下载视频包：读仓库 HEAD 提交，把 `pet.json`（可选）与
+* `config.jsonc` 解析成一份 `PresetPetItem`（config / uri / image 全指向
+* `raw.githubusercontent.com/<owner>/<name>/<commit>/…`）。更新时再 HEAD 校验素材是否齐全。
+*
+* 与上游逐条一致：仓库地址校验、12s 超时、`kind` 必须为 `dsh`、只认 raw.githubusercontent。
+*/
+const PET_MANIFEST_MAX_BYTES = 64 * 1024;
+const PET_CONFIG_MAX_BYTES = 1024 * 1024;
+const PET_REPOSITORY_TIMEOUT_MS = 12e3;
+const PET_REPOSITORY_DOWNLOAD_TIMEOUT_MS = 12e3;
+/** 默认拉取的 `pet.json`（仓库无清单时使用）。 */
+function defaultManifest(name) {
+	return {
+		id: name,
+		kind: "dsh",
+		configPath: "config.jsonc",
+		uriPath: "webm",
+		previewPath: "preview/preview.gif",
+		ext: {
+			default: "webm",
+			mac: "webm"
+		}
+	};
+}
+/** 解析 `owner/repo` 或 `https://github.com/owner/repo`。对应 Rust `parse_pet_repository`。 */
+function parsePetRepository(repository) {
+	const invalid = () => {
+		throw new Error("PET_REPOSITORY_INVALID: use owner/repo or https://github.com/owner/repo");
+	};
+	const input = repository.trim();
+	let path = input;
+	if (input.includes("://")) {
+		let url;
+		try {
+			url = new URL(input);
+		} catch {
+			return invalid();
+		}
+		if (url.protocol !== "https:" || url.hostname !== "github.com" || url.username || url.password || url.port || url.search || url.hash) return invalid();
+		path = url.pathname.replace(/^\/+/u, "").replace(/\/+$/u, "");
+	}
+	const slash = path.indexOf("/");
+	if (slash < 0) return invalid();
+	const owner = path.slice(0, slash);
+	let name = path.slice(slash + 1);
+	if (name.endsWith(".git")) name = name.slice(0, -4);
+	if (!owner || owner.length > 39 || owner.startsWith("-") || owner.endsWith("-") || !/^[\w-]+$/u.test(owner) || ![...owner].every((c) => c.charCodeAt(0) < 128) || !name || name.length > 100 || name === "." || name === ".." || !/^[\w.-]+$/u.test(name) || ![...name].every((c) => c.charCodeAt(0) < 128)) return invalid();
+	return {
+		owner,
+		name
+	};
+}
+/** 在 base 之后追加一段受控相对路径（对应 Rust `repository_asset_url`）。 */
+function repositoryAssetUrl(base, relative) {
+	const normalized = safeRelativePath(relative);
+	const url = new URL(base);
+	const prefix = url.pathname.replace(/\/+$/u, "");
+	return `${url.origin}${prefix}/${normalized}`;
+}
+/** 从 `pet.json`（可选）构造预设条目。对应 Rust `repository_spec`。 */
+function repositorySpec(base, name, manifestBytes) {
+	const manifest = manifestBytes === null ? defaultManifest(name) : parseManifest(manifestBytes);
+	if (manifest.kind !== "dsh") throw new Error("PET_KIND_FORBIDDEN: repository pets must use kind dsh");
+	const config = repositoryAssetUrl(base, manifest.configPath ?? "");
+	const image = repositoryAssetUrl(base, manifest.previewPath ?? "");
+	const uriDefault = repositoryAssetUrl(base, manifest.uriPath ?? "");
+	const uriMac = manifest.macUriPath ? repositoryAssetUrl(base, manifest.macUriPath) : void 0;
+	return {
+		id: manifest.id,
+		name: (manifest.displayName ?? "").trim() || manifest.id,
+		desc: manifest.description ?? null,
+		image,
+		kind: "dsh",
+		size: manifest.size ?? null,
+		config,
+		uri: uriMac ? {
+			default: uriDefault,
+			mac: uriMac
+		} : { default: uriDefault },
+		ext: manifest.ext ?? null,
+		remote: true
+	};
+}
+/** 去掉 JSONC 注释与尾逗号（对应 Rust `strip_jsonc`，字符串字面量感知）。 */
+function stripJsonc(text) {
+	let out = "";
+	let inString = false;
+	let inLine = false;
+	let inBlock = false;
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+		const next = text[i + 1];
+		if (inLine) {
+			if (ch === "\n") {
+				inLine = false;
+				out += ch;
+			}
+			continue;
+		}
+		if (inBlock) {
+			if (ch === "*" && next === "/") {
+				inBlock = false;
+				i++;
+			}
+			continue;
+		}
+		if (inString) {
+			out += ch;
+			if (ch === "\\") out += text[++i] ?? "";
+			else if (ch === "\"") inString = false;
+			continue;
+		}
+		if (ch === "\"") {
+			inString = true;
+			out += ch;
+		} else if (ch === "/" && next === "/") {
+			inLine = true;
+			i++;
+		} else if (ch === "/" && next === "*") {
+			inBlock = true;
+			i++;
+		} else out += ch;
+	}
+	return out.replace(/,(\s*[}\]])/gu, "$1");
+}
+/** 配置里的全部动画名（素材自检用；对应 Rust `animation_names`）。 */
+function animationNames(config) {
+	const names = /* @__PURE__ */ new Set();
+	/** 池 = 字符串 / 字符串数组。 */
+	function collect(value) {
+		if (typeof value === "string") {
+			names.add(value);
+			return;
+		}
+		if (Array.isArray(value)) {
+			for (const item of value) collect(item);
+			return;
+		}
+		if (value && typeof value === "object") {
+			for (const item of Object.values(value)) if (typeof item === "string" || Array.isArray(item)) collect(item);
+		}
+	}
+	if (config && typeof config === "object") {
+		const animations = config.animations;
+		if (animations && typeof animations === "object") for (const [key, value] of Object.entries(animations)) if (key === "moves") {
+			const moves = value;
+			for (const action of moves?.actions ?? []) if (typeof action?.name === "string") names.add(action.name);
+		} else if (key === "categories") for (const category of value ?? []) for (const name of category.actions ?? []) collect(name);
+		else if (key === "events" || key === "motions") collect(value);
+		else collect(value);
+	}
+	return [...names];
+}
+/**
+* GitHub 请求头。
+*
+* 未认证的 GitHub API 限流是 **60 次/小时/IP**：更新检查与仓库登记/更新都会命中它
+* （上游用应用内代理与自己的客户端，同样受这个限制）。这里额外支持 `GITHUB_TOKEN`
+* （或 `GH_TOKEN`）环境变量：设了就用它换 5000 次/小时的配额，没设就按匿名请求走 ——
+* 默认行为不变。
+*/
+function githubHeaders() {
+	const token = process.env.GITHUB_TOKEN?.trim() || process.env.GH_TOKEN?.trim();
+	const base = {
+		"user-agent": "dsh-pet-lite",
+		"accept": "application/vnd.github+json"
+	};
+	return token ? {
+		...base,
+		authorization: `Bearer ${token}`
+	} : base;
+}
+async function fetchText(fetchImpl, url, limit, optional) {
+	const response = await fetchImpl(url, {
+		headers: githubHeaders(),
+		redirect: "follow",
+		signal: AbortSignal.timeout(PET_REPOSITORY_DOWNLOAD_TIMEOUT_MS)
+	});
+	if (optional && response.status === 404) return null;
+	if (!response.ok) throw new Error(`PET_REPOSITORY_DOWNLOAD_FAILED: HTTP ${response.status}`);
+	if (Number(response.headers.get("content-length") ?? "0") > limit) throw new Error("PET_REPOSITORY_TOO_LARGE: metadata exceeds its byte limit");
+	const text = await response.text();
+	if (Buffer.byteLength(text) > limit) throw new Error("PET_REPOSITORY_TOO_LARGE: metadata exceeds its byte limit");
+	return text;
+}
+/** 读仓库 HEAD 提交 SHA（40 位十六进制）。对应 Rust `repository_head`。 */
+async function repositoryHead(fetchImpl, owner, name) {
+	const text = await fetchText(fetchImpl, `https://api.github.com/repos/${owner}/${name}/commits/HEAD`, PET_CONFIG_MAX_BYTES, false);
+	const value = JSON.parse(text ?? "{}");
+	const sha = typeof value.sha === "string" ? value.sha : "";
+	if (!/^[\da-f]{40}$/iu.test(sha)) throw new Error("PET_REPOSITORY_INVALID: missing commit SHA");
+	return sha.toLowerCase();
+}
+/** 读一份仓库宠物登记（`checkMedia` 时额外 HEAD 校验素材齐全）。对应 Rust `read_repository_spec`。 */
+async function readRepositorySpec(fetchImpl, base, name, checkMedia) {
+	const spec = repositorySpec(base, name, await fetchText(fetchImpl, repositoryAssetUrl(base, "pet.json"), PET_MANIFEST_MAX_BYTES, true));
+	const configText = await fetchText(fetchImpl, spec.config, PET_CONFIG_MAX_BYTES, false);
+	const config = JSON.parse(stripJsonc(configText ?? "{}"));
+	if (checkMedia) {
+		const ext = spec.ext ?? {
+			default: "webm",
+			mac: "webm"
+		};
+		const urls = [spec.image];
+		const names = animationNames(config);
+		for (const [uri, extension] of [[spec.uri.default, ext.default], [spec.uri.mac, ext.mac]]) {
+			if (!uri || !extension) continue;
+			for (const anim of names) urls.push(repositoryAssetUrl(`${uri}/`, `${anim}.${extension}`));
+		}
+		for (const url of urls) {
+			const response = await fetchImpl(url, {
+				method: "HEAD",
+				headers: githubHeaders(),
+				redirect: "follow",
+				signal: AbortSignal.timeout(PET_REPOSITORY_DOWNLOAD_TIMEOUT_MS)
+			});
+			if (!response.ok) throw new Error(`PET_ASSET_INVALID: HTTP ${response.status} for ${url}`);
+		}
+	}
+	return spec;
+}
+/** 从条目里解析出 `{owner, name, 当前提交}`（对应 Rust `pet_repository_revision`）。 */
+function petRepositoryRevision(spec) {
+	const url = new URL(spec.config ?? "");
+	const parts = url.pathname.split("/").filter(Boolean);
+	const sha = parts[2] ?? "";
+	if (url.protocol !== "https:" || url.hostname !== "raw.githubusercontent.com" || url.username || url.password || url.port || url.search || url.hash || parts.length < 4 || !(sha === "HEAD" || /^[\da-f]{40}$/iu.test(sha))) throw new Error("PET_REPOSITORY_INVALID: pet is not a registered GitHub repository");
+	const { owner, name } = parsePetRepository(`${parts[0]}/${parts[1]}`);
+	return {
+		owner,
+		name,
+		current: sha
+	};
+}
+/** 登记一个新仓库宠物：读 HEAD + 清单 → PresetPetItem。12s 超时。 */
+async function importPetRepository(fetchImpl, repository) {
+	const { owner, name } = parsePetRepository(repository);
+	const run = async () => {
+		const commit = await repositoryHead(fetchImpl, owner, name);
+		return readRepositorySpec(fetchImpl, `https://raw.githubusercontent.com/${owner}/${name}/${commit}/`, name, false);
+	};
+	return withTimeout(run(), PET_REPOSITORY_TIMEOUT_MS, "PET_REPOSITORY_TIMEOUT: metadata registration exceeded 12 seconds");
+}
+/** 更新一个已登记仓库宠物：读最新 HEAD + 清单 → 新 PresetPetItem（保留原 id）。 */
+async function updatePetRepository(fetchImpl, spec) {
+	const { owner, name } = petRepositoryRevision(spec);
+	const run = async () => {
+		const commit = await repositoryHead(fetchImpl, owner, name);
+		return {
+			...await readRepositorySpec(fetchImpl, `https://raw.githubusercontent.com/${owner}/${name}/${commit}/`, name, true),
+			id: spec.id
+		};
+	};
+	return withTimeout(run(), PET_REPOSITORY_TIMEOUT_MS, "PET_REPOSITORY_TIMEOUT: update exceeded 12 seconds");
+}
+/** 检查已登记仓库宠物是否有更新：HEAD 提交与登记的提交不同即提示更新。12s 总预算。 */
+async function checkPetUpdates(fetchImpl, specs) {
+	const remote = specs.filter((spec) => spec.remote);
+	const result = [];
+	await withTimeout(async () => {
+		const checks = remote.map(async (spec) => {
+			try {
+				const { owner, name, current } = petRepositoryRevision(spec);
+				const latest = await repositoryHead(fetchImpl, owner, name);
+				if (current.toLowerCase() !== latest) result.push(spec.id);
+			} catch {}
+		});
+		await Promise.all(checks);
+	}, PET_REPOSITORY_TIMEOUT_MS, "PET_REPOSITORY_TIMEOUT: update check exceeded 12 seconds");
+	return result;
+}
+async function withTimeout(task, ms, message) {
+	let timer;
+	const timeout = new Promise((_, reject) => {
+		timer = setTimeout(() => reject(new Error(message)), ms);
+	});
+	try {
+		const run = typeof task === "function" ? task() : task;
+		return await Promise.race([run, timeout]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
 }
 //#endregion
 //#region src/host/runtime.ts
@@ -1073,102 +1870,6 @@ function handleAssistantStream(payload) {
 	reducer.chunk({ id }, chunk);
 }
 //#endregion
-//#region src/host/store.ts
-/** `$DSH_HOME`（默认 `~/.dsh`），与 DSH 其余工具链一致。 */
-function dshHome() {
-	const configured = process.env.DSH_HOME?.trim();
-	if (!configured) return join(homedir(), ".dsh");
-	return configured === "~" ? homedir() : configured;
-}
-function storeFile() {
-	return join(dshHome(), "pet-lite", "pet.json");
-}
-function clampSize(value) {
-	const size = typeof value === "number" ? value : Number(value);
-	if (!Number.isFinite(size)) return 100;
-	return Math.round(Math.min(200, Math.max(50, size)));
-}
-/** 未知 id 收敛为首个内置预设（与 Rust `resolve_active_pet` 的兜底同义）。 */
-function normalizeActiveId(value) {
-	const id = typeof value === "string" ? value.trim() : "";
-	if (!id) return "";
-	return builtInCatalog().some((item) => item.id === id) ? id : id;
-}
-function defaults() {
-	return {
-		active_pet: builtInCatalog()[0]?.id ?? "",
-		enabled: false,
-		pet_size: 100,
-		throw_enabled: false
-	};
-}
-/** 读取持久设置；文件缺失或损坏时回落到默认值。 */
-function readPersisted() {
-	const file = storeFile();
-	if (!existsSync(file)) return defaults();
-	try {
-		const raw = JSON.parse(readFileSync(file, "utf8"));
-		const fallback = defaults();
-		return {
-			active_pet: raw.active_pet === void 0 ? fallback.active_pet : normalizeActiveId(raw.active_pet),
-			enabled: typeof raw.enabled === "boolean" ? raw.enabled : fallback.enabled,
-			pet_size: clampSize(raw.pet_size),
-			throw_enabled: typeof raw.throw_enabled === "boolean" ? raw.throw_enabled : fallback.throw_enabled
-		};
-	} catch {
-		return defaults();
-	}
-}
-/** 原子写盘（临时文件 + rename）；失败只返回 false，调用方保持内存态。 */
-function writePersisted(value) {
-	const file = storeFile();
-	try {
-		mkdirSync(join(dshHome(), "pet-lite"), { recursive: true });
-		const tmp = `${file}.tmp`;
-		writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8");
-		renameSync(tmp, file);
-		return true;
-	} catch {
-		return false;
-	}
-}
-/** 内存态：进程内唯一真值，落盘失败也不回滚（下次写入会再试）。 */
-let current;
-function state() {
-	if (current === void 0) current = readPersisted();
-	return current;
-}
-/** 更新内存态并落盘；返回更新后的快照。 */
-function update(patch) {
-	const base = state();
-	const next = {
-		active_pet: patch.active_pet === void 0 ? base.active_pet : normalizeActiveId(patch.active_pet),
-		enabled: patch.enabled === void 0 ? base.enabled : patch.enabled,
-		pet_size: patch.pet_size === void 0 ? base.pet_size : clampSize(patch.pet_size),
-		throw_enabled: patch.throw_enabled === void 0 ? base.throw_enabled : patch.throw_enabled
-	};
-	current = next;
-	writePersisted(next);
-	return next;
-}
-/**
-* 推导对外快照（对应 Rust `PetStatus`）。
-*
-* `visible` 不是持久字段：无选择时必然不可见（没有内容可渲染，不留空窗口）。
-*/
-function snapshot(input) {
-	const value = state();
-	return {
-		active_pet: value.active_pet,
-		enabled: value.enabled,
-		pet_size: value.pet_size,
-		throw_enabled: value.throw_enabled,
-		visible: value.enabled && value.active_pet !== "",
-		desktop_supported: input.desktopSupported,
-		desktop_open: input.desktopOpen
-	};
-}
-//#endregion
 //#region src/host/routes.ts
 const JSON_HEADERS = {
 	"content-type": "application/json; charset=utf-8",
@@ -1190,7 +1891,7 @@ function sendText(res, status, body) {
 	res.end(body);
 }
 /** 读取请求体（带长度上限）。 */
-async function readBody(req, limit = 1024 * 1024) {
+async function readBody(req, limit = 64 * 1024 * 1024) {
 	const chunks = [];
 	let size = 0;
 	for await (const chunk of req) {
@@ -1201,19 +1902,34 @@ async function readBody(req, limit = 1024 * 1024) {
 	}
 	return Buffer.concat(chunks).toString("utf8");
 }
-/** 当前状态快照（每次请求实时读取，避免缓存跨实例残留）。 */
+/** 解析 JSON 请求体；非法时回 400 并返回 undefined。 */
+async function readJson(req, res) {
+	try {
+		const value = JSON.parse(await readBody(req));
+		if (value === null || typeof value !== "object") {
+			sendText(res, 400, "PET_BAD_REQUEST: body must be an object");
+			return;
+		}
+		return value;
+	} catch {
+		sendText(res, 400, "PET_BAD_REQUEST: body must be JSON");
+		return;
+	}
+}
+/** 当前状态快照（每次请求实时读取）。 */
 function runtimeStatus(ctx) {
 	return snapshot({
 		desktopSupported: ctx.desktopSupported,
 		desktopOpen: ctx.desktopOpen
 	});
 }
-/** 一次拿齐三份清单 + 状态（对应上游 `loadPetCatalog` 的四个命令聚合）。 */
-function catalog(ctx) {
+/** 一次拿齐三份清单 + 状态（= `list_preset_pets` + `list_pets(chat)` + `list_pets(codex)`）。 */
+async function catalog(ctx) {
+	const [chatPets, codexPets] = await Promise.all([listPets("chat"), listPets("codex")]);
 	return {
-		presetPets: builtInCatalog(),
-		chatPets: [],
-		codexPets: [],
+		presetPets: fullCatalog(),
+		chatPets,
+		codexPets,
 		status: runtimeStatus(ctx)
 	};
 }
@@ -1227,8 +1943,8 @@ const settingsRoute = {
 const catalogRoute = {
 	method: "GET",
 	path: `${ROUTE_PREFIX}${CATALOG_PATH}`,
-	handle(_req, res, _url, ctx) {
-		sendJson(res, 200, catalog(ctx));
+	async handle(_req, res, _url, ctx) {
+		sendJson(res, 200, await catalog(ctx));
 	}
 };
 /**
@@ -1240,17 +1956,8 @@ const patchRoute = {
 	method: "PUT",
 	path: `${ROUTE_PREFIX}${SETTINGS_PATH}`,
 	async handle(req, res, _url, ctx) {
-		let patch;
-		try {
-			patch = JSON.parse(await readBody(req));
-		} catch {
-			sendText(res, 400, "PET_BAD_REQUEST: body must be JSON");
-			return;
-		}
-		if (patch === null || typeof patch !== "object") {
-			sendText(res, 400, "PET_BAD_REQUEST: body must be an object");
-			return;
-		}
+		const patch = await readJson(req, res);
+		if (patch === void 0) return;
 		const next = update({
 			active_pet: patch.active_pet,
 			enabled: patch.enabled,
@@ -1276,28 +1983,114 @@ const routes = [
 	{
 		method: "GET",
 		path: `${ROUTE_PREFIX}/asset`,
-		handle(_req, res, url) {
-			const id = url.searchParams.get("id") ?? "";
-			const item = builtInCatalog().find((entry) => entry.id === id);
-			if (!item) {
+		async handle(_req, res, url, ctx) {
+			const id = (url.searchParams.get("id") ?? "").trim();
+			if (!id) {
+				sendText(res, 400, "PET_ID_INVALID: id is required");
+				return;
+			}
+			const preset = fullCatalog().find((entry) => entry.id === id);
+			if (preset) {
+				sendJson(res, 200, presetAsset(preset));
+				return;
+			}
+			let qualified;
+			try {
+				qualified = parseQualifiedId(id);
+			} catch {
 				sendText(res, 404, `PET_NOT_FOUND: ${id}`);
 				return;
 			}
-			sendJson(res, 200, presetAsset(item));
+			const found = findPetDirectory(petsDir(qualified.source), qualified.manifestId);
+			if (!found) {
+				sendText(res, 404, `PET_NOT_FOUND: ${id}`);
+				return;
+			}
+			try {
+				if (found.manifest.kind === "dsh") {
+					const configPath = safeRelativePath(found.manifest.configPath ?? "config.jsonc");
+					const ext = found.manifest.ext ?? {
+						default: "webm",
+						mac: "mov"
+					};
+					const uriPath = safeRelativePath(found.manifest.uriPath ?? "webm");
+					sendJson(res, 200, {
+						kind: "dsh",
+						id,
+						config: readFileSync(join(found.directory, configPath), "utf8"),
+						uri: { default: `${ctx.origin}${ROUTE_PREFIX}/file?id=${encodeURIComponent(id)}&path=${encodeURIComponent(uriPath)}/{name}.{ext}` },
+						ext,
+						size: found.manifest.size
+					});
+					return;
+				}
+				const { url: spritesheet, grid } = await readSpritesheet(found.directory, found.manifest.spritesheetPath ?? "", found.manifest.spriteVersionNumber);
+				sendJson(res, 200, {
+					kind: "codex",
+					id,
+					spritesheet,
+					sprite_version_number: found.manifest.spriteVersionNumber === 1 ? 1 : grid.version,
+					columns: grid.columns,
+					rows: grid.rows
+				});
+			} catch (error) {
+				sendText(res, 422, `PET_ASSET_INVALID: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	},
+	{
+		method: "GET",
+		path: `${ROUTE_PREFIX}/file`,
+		handle(_req, res, url) {
+			const id = (url.searchParams.get("id") ?? "").trim();
+			const relative = url.searchParams.get("path") ?? "";
+			let qualified;
+			try {
+				qualified = parseQualifiedId(id);
+			} catch {
+				sendText(res, 400, "PET_ID_INVALID: source-qualified id is required");
+				return;
+			}
+			const found = findPetDirectory(petsDir(qualified.source), qualified.manifestId);
+			if (!found) {
+				sendText(res, 404, `PET_NOT_FOUND: ${id}`);
+				return;
+			}
+			let target;
+			try {
+				target = join(found.directory, safeRelativePath(relative));
+			} catch {
+				sendText(res, 400, "PET_PATH_INVALID: invalid asset path");
+				return;
+			}
+			const base = found.directory;
+			if (!target.startsWith(base) || !existsSync(target) || !statSync(target).isFile()) {
+				sendText(res, 404, "PET_ASSET_NOT_FOUND");
+				return;
+			}
+			const extension = target.slice(target.lastIndexOf(".")).toLowerCase();
+			const contentType = extension === ".webm" ? "video/webm" : extension === ".mov" ? "video/quicktime" : extension === ".mp4" ? "video/mp4" : extension === ".png" ? "image/png" : "application/octet-stream";
+			const bytes = readFileSync(target);
+			res.writeHead(200, {
+				"content-type": contentType,
+				"content-length": bytes.length,
+				"cache-control": "public, max-age=3600"
+			});
+			res.end(bytes);
 		}
 	},
 	{
 		method: "GET",
 		path: `${ROUTE_PREFIX}/config`,
 		async handle(_req, res, url) {
-			const id = url.searchParams.get("id") ?? "";
-			const item = builtInCatalog().find((entry) => entry.id === id);
+			const id = (url.searchParams.get("id") ?? "").trim();
+			const item = fullCatalog().find((entry) => entry.id === id);
 			if (!item) {
 				sendText(res, 404, `PET_NOT_FOUND: ${id}`);
 				return;
 			}
 			try {
-				const response = await fetch(item.config, { signal: AbortSignal.timeout(15e3) });
+				const response = await fetch(item.config ?? "", { signal: AbortSignal.timeout(15e3) });
 				if (!response.ok) {
 					sendText(res, 502, `PET_CONFIG_FETCH_FAILED: ${response.status}`);
 					return;
@@ -1311,6 +2104,137 @@ const routes = [
 			} catch (error) {
 				sendText(res, 502, `PET_CONFIG_FETCH_FAILED: ${error instanceof Error ? error.message : String(error)}`);
 			}
+		}
+	},
+	{
+		method: "GET",
+		path: `${ROUTE_PREFIX}/pets`,
+		async handle(_req, res, url) {
+			const source = url.searchParams.get("source") ?? "";
+			if (source !== "chat" && source !== "codex") {
+				sendText(res, 400, "PET_SOURCE_INVALID: source must be chat or codex");
+				return;
+			}
+			try {
+				sendJson(res, 200, await listPets(source));
+			} catch (error) {
+				sendText(res, 500, `PET_LIST_FAILED: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	},
+	{
+		method: "POST",
+		path: `${ROUTE_PREFIX}/import`,
+		async handle(req, res) {
+			const body = await readJson(req, res);
+			if (body === void 0) return;
+			if (typeof body.data !== "string" || body.data.length === 0) {
+				sendText(res, 400, "PET_PACKAGE_DECODE_FAILED: data is required");
+				return;
+			}
+			try {
+				sendJson(res, 200, await importPetArchive(body.data, "codex"));
+			} catch (error) {
+				sendText(res, 422, error instanceof Error ? error.message : String(error));
+			}
+		}
+	},
+	{
+		method: "POST",
+		path: `${ROUTE_PREFIX}/repository`,
+		async handle(req, res) {
+			const body = await readJson(req, res);
+			if (body === void 0) return;
+			if (typeof body.repository !== "string") {
+				sendText(res, 400, "PET_REPOSITORY_INVALID: repository is required");
+				return;
+			}
+			try {
+				sendJson(res, 200, registerRemotePet(await importPetRepository(fetch, body.repository)));
+			} catch (error) {
+				sendText(res, 422, error instanceof Error ? error.message : String(error));
+			}
+		}
+	},
+	{
+		method: "PUT",
+		path: `${ROUTE_PREFIX}/repository`,
+		async handle(req, res) {
+			const body = await readJson(req, res);
+			if (body === void 0) return;
+			const id = typeof body.id === "string" ? body.id : "";
+			const entry = fullCatalog().find((item) => item.id === id && item.remote);
+			if (!entry) {
+				sendText(res, 404, `PET_NOT_FOUND: preset ${id} is not registered`);
+				return;
+			}
+			try {
+				sendJson(res, 200, replaceRemotePet(await updatePetRepository(fetch, entry)));
+			} catch (error) {
+				sendText(res, 422, error instanceof Error ? error.message : String(error));
+			}
+		}
+	},
+	{
+		method: "DELETE",
+		path: `${ROUTE_PREFIX}/repository`,
+		handle(_req, res, url, ctx) {
+			const id = (url.searchParams.get("id") ?? "").trim();
+			try {
+				unregisterRemotePet(id);
+				sendJson(res, 200, runtimeStatus(ctx));
+			} catch (error) {
+				sendText(res, 404, error instanceof Error ? error.message : String(error));
+			}
+		}
+	},
+	{
+		method: "GET",
+		path: `${ROUTE_PREFIX}/updates`,
+		async handle(_req, res) {
+			try {
+				sendJson(res, 200, await checkPetUpdates(fetch, fullCatalog()));
+			} catch (error) {
+				sendText(res, 500, `PET_REPOSITORY_DOWNLOAD_FAILED: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	},
+	{
+		method: "DELETE",
+		path: `${ROUTE_PREFIX}/pet`,
+		async handle(_req, res, url, ctx) {
+			const id = (url.searchParams.get("id") ?? "").trim();
+			try {
+				if (id.includes(":")) {
+					const { source, manifestId } = parseQualifiedId(id);
+					const found = findPetDirectory(petsDir(source), manifestId);
+					if (!found) throw new Error(`PET_NOT_FOUND: pet ${id} was not found`);
+					rmSync(found.directory, {
+						recursive: true,
+						force: true
+					});
+				} else unregisterRemotePet(id);
+				sendJson(res, 200, runtimeStatus(ctx));
+			} catch (error) {
+				sendText(res, 404, error instanceof Error ? error.message : String(error));
+			}
+		}
+	},
+	{
+		method: "POST",
+		path: `${ROUTE_PREFIX}/open-external`,
+		async handle(req, res) {
+			const body = await readJson(req, res);
+			if (body === void 0) return;
+			const value = typeof body.url === "string" ? body.url : "";
+			if (!/^https?:\/\/\S+$/u.test(value)) {
+				sendText(res, 400, "PET_URL_INVALID: only http(s) URLs are allowed");
+				return;
+			}
+			sendJson(res, 200, {
+				ok: true,
+				url: value
+			});
 		}
 	},
 	{
@@ -1398,6 +2322,8 @@ function apply(ctx) {
 	let desktopOpen = false;
 	/** 当前环境能否真的开一个独立窗口（纯浏览器访问时为 false）。 */
 	const desktopSupported = () => hasGraphicalDisplay() && resolveElectronPath() !== void 0;
+	/** 当前监听端口对应的本机 origin（素材 / 配置路由拼本机地址用）。 */
+	const origin = () => `http://127.0.0.1:${ctx.webServer.port ?? 0}`;
 	const openDesktop = async () => {
 		if (desktopOpen) return;
 		if (!desktopSupported()) throw new Error("PET_DESKTOP_UNAVAILABLE: no usable Electron runtime");
@@ -1437,6 +2363,9 @@ function apply(ctx) {
 		setDesktop: async (open) => {
 			if (open) await openDesktop();
 			else await closeDesktop();
+		},
+		get origin() {
+			return origin();
 		}
 	};
 	ctx.effect(() => {

@@ -2,13 +2,15 @@ import type { PetAsset, PresetPetItem } from '../shared/types'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { readRemotePets, writeRemotePets } from './store'
 
 /**
  * host/catalog.ts — 预设宠物清单（对应 apps/desktop `resources/manifest.jsonc`
  * 的 `pets.built-in`）。
  *
- * 内置清单与用户在设置页登记的远端条目合并返回；内置优先，登记条目与内置 id 撞车时
- * 丢弃登记条目（宠物先进登记清单、后被收进内置清单的机器会留下这种残余）。
+ * 内置清单与用户在设置页登记的远端条目（`readRemotePets`）合并返回；内置优先，登记
+ * 条目与内置 id 撞车时丢弃登记条目（宠物先进登记清单、后被收进内置清单的机器会留下
+ * 这种残余）。登记条目的增删改全部落盘到 `remote-pets.json`。
  */
 
 interface RawPreset {
@@ -73,11 +75,11 @@ function toItem(spec: RawPreset, remote: boolean): PresetPetItem {
 }
 
 /** 合并内置与登记条目（内置在前；id 撞车时丢弃登记条目）。 */
-export function mergeCatalog(remote: readonly RawPreset[] = []): PresetPetItem[] {
+export function mergeCatalog(remote: readonly PresetPetItem[] = readRemotePets()): PresetPetItem[] {
   const builtInIds = new Set(BUILT_IN.map(spec => spec.id))
   return [
     ...BUILT_IN.map(spec => toItem(spec, false)),
-    ...remote.filter(spec => !builtInIds.has(spec.id)).map(spec => toItem(spec, true)),
+    ...remote.filter(spec => !builtInIds.has(spec.id)).map(spec => spec.remote === false ? { ...spec, remote: true } : spec),
   ]
 }
 
@@ -86,9 +88,50 @@ export function builtInCatalog(): PresetPetItem[] {
   return mergeCatalog([])
 }
 
+/** 完整目录（内置 + 登记）。 */
+export function fullCatalog(): PresetPetItem[] {
+  return mergeCatalog(readRemotePets())
+}
+
 /** 按 id 取一条预设；不存在时返回 undefined。 */
 export function findPreset(id: string): PresetPetItem | undefined {
-  return mergeCatalog().find(item => item.id === id)
+  return fullCatalog().find(item => item.id === id)
+}
+
+/** 是否已登记该远端 id。 */
+function isRegistered(id: string): boolean {
+  return readRemotePets().some(item => item.id === id)
+}
+
+/** 登记一个远端仓库宠物（内置 id 与重复 id 拒绝）。 */
+export function registerRemotePet(spec: PresetPetItem): PresetPetItem {
+  const current = readRemotePets()
+  if (BUILT_IN.some(item => item.id === spec.id))
+    throw new Error(`PET_ALREADY_EXISTS: preset ${spec.id} is built in`)
+  if (current.some(item => item.id === spec.id || item.config === spec.config))
+    throw new Error(`PET_ALREADY_EXISTS: preset ${spec.id} is already registered`)
+  const next = [...current, { ...spec, remote: true }]
+  writeRemotePets(next)
+  return { ...spec, remote: true }
+}
+
+/** 覆写一个已登记条目（用于更新）。 */
+export function replaceRemotePet(spec: PresetPetItem): PresetPetItem {
+  const current = readRemotePets()
+  const index = current.findIndex(item => item.id === spec.id)
+  if (index < 0)
+    throw new Error(`PET_NOT_FOUND: preset ${spec.id} is not registered`)
+  const next = current.slice()
+  next[index] = { ...spec, remote: true }
+  writeRemotePets(next)
+  return { ...spec, remote: true }
+}
+
+/** 反注册一个远端条目。 */
+export function unregisterRemotePet(id: string): void {
+  if (!isRegistered(id))
+    throw new Error(`PET_NOT_FOUND: preset ${id} is not registered`)
+  writeRemotePets(readRemotePets().filter(item => item.id !== id))
 }
 
 /**

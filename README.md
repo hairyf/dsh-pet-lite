@@ -41,12 +41,26 @@
 | 状态容器 | valtio-define | 官方 `@deepseek-ai/dsh-client-store` |
 | UI 组件 | dsh-tauri-ui | 官方 `@deepseek-ai/dsh-client-ui-primitives` |
 | 设置持久化 | Rust `tauri-plugin-store` | `$DSH_HOME/pet-lite/pet.json`（原子写） |
+| 远端登记目录 | Rust store | `$DSH_HOME/pet-lite/remote-pets.json`（mtime 失效缓存） |
 
-### 未实现（设置页会明确报错，不假装成功）
+### 已实现的能力（与上游同语义）
 
-远端仓库登记、zip 导入、更新检查、外链打开、强制 XWayland 开关 —— 这些在上游由 Rust 侧能力
-承担。本插件的宿主没有对应后端，因此对应动作用 `PET_UNSUPPORTED_COMMAND` 明确失败而不是静默
-返回成功。
+- **设置**：选择 / 启用 / 大小 / 抛射开关，命令回吐权威状态。
+- **清单**：内置预设（与 desktop `resources/manifest.jsonc` 同源）+ `chat` / `codex` 两份文件系统清单。
+- **远端仓库登记**：读仓库 HEAD 提交 + `pet.json`（可选）+ `config.jsonc`，登记为只含资源地址的条目
+  （不下载视频包）；`kind` 必须为 `dsh`，只认 `raw.githubusercontent.com`。
+- **更新检查 / 更新**：按 HEAD 提交变化判定；更新时额外 HEAD 校验素材齐全。
+- **zip 导入**：条目数 / 解压总量上限、可移植相对路径、单一 `pet.json` 根、忽略 OS 元数据
+  （`__MACOSX`、`._*`、`.DS_Store`、`Thumbs.db`、`desktop.ini`）、拒绝覆盖已存在 id。
+- **删除**：远端条目反注册；来源限定 id（`chat:` / `codex:`）删除目录。
+- **外链**：宿主校验仅 http(s)，消费端负责真正打开。
+
+### 注意事项
+
+- GitHub API 未认证限流是 **60 次/小时/IP**（更新检查与登记都会命中）。设 `GITHUB_TOKEN`
+  或 `GH_TOKEN` 可换 5000 次/小时配额；不设则按匿名请求走。
+- 强制 XWayland 开关不适用（桌面窗口来自 Electron，不是 X11/Wayland 原生窗口），
+  对应命令明确返回 `PET_UNSUPPORTED_COMMAND`。
 
 ## Electron 运行时从哪来
 
@@ -87,9 +101,18 @@ DSH_HOME="$DSH_HOME" dsh --profile web
 | --- | --- | --- |
 | `GET` | `/dsh-pet-lite/settings` | 当前状态快照（选择 / 启用 / 大小 / 抛射 / 桌面可用性） |
 | `PUT` | `/dsh-pet-lite/settings` | 更新上述字段，回吐**权威**状态并同步窗口开合 |
-| `GET` | `/dsh-pet-lite/catalog` | 预设清单 + 状态（设置页一次拿齐） |
-| `GET` | `/dsh-pet-lite/asset?id=` | 单个预设的渲染参数 |
+| `GET` | `/dsh-pet-lite/catalog` | 预设 + `chat`/`codex` 清单 + 状态（设置页一次拿齐） |
+| `GET` | `/dsh-pet-lite/asset?id=` | 渲染参数（预设直连远端；来源限定 id 读盘） |
+| `GET` | `/dsh-pet-lite/file?id=&path=` | 本地宠物素材（限定在该宠物目录内） |
 | `GET` | `/dsh-pet-lite/config?id=` | 预设配置代理（`file://` 页面避免 CORS） |
+| `GET` | `/dsh-pet-lite/pets?source=` | 某来源（`chat`/`codex`）的文件系统宠物清单 |
+| `POST` | `/dsh-pet-lite/import` | 导入 Codex 宠物 zip（base64） |
+| `POST` | `/dsh-pet-lite/repository` | 登记远端 GitHub 仓库宠物 |
+| `PUT` | `/dsh-pet-lite/repository` | 更新一个已登记仓库宠物（校验素材齐全） |
+| `DELETE` | `/dsh-pet-lite/repository?id=` | 反注册远端条目 |
+| `GET` | `/dsh-pet-lite/updates` | 检查已登记条目是否有新提交 |
+| `DELETE` | `/dsh-pet-lite/pet?id=` | 删除宠物（远端反注册 / 删除来源目录） |
+| `POST` | `/dsh-pet-lite/open-external` | 校验外链（仅 http/https） |
 | `GET` | `/dsh-pet-lite/session/stream` | 会话活动 SSE（`data:` 帧 + 心跳 + `state-lost`） |
 
 SSE 帧格式与上游逐字对齐；`retry: 1000` 只随首帧发出。
@@ -105,6 +128,9 @@ src/
     catalog.ts presets.json # 内置预设清单（与 desktop manifest 同源）
     store.ts                # 设置持久化（$DSH_HOME/pet-lite/pet.json）
     electron-runtime.ts     # Electron 解析 + 进程守护（照搬 dsh-pet 优先级）
+    pet-fs.ts               # 文件系统宠物扫描 / 清单 / 列表
+    pet-import.ts           # zip 导入（安全约束同上游）
+    pet-repo.ts             # 远端仓库登记 / 更新检查
     session-stream*.ts      # 会话总线 → 展示态投影（reducer 逐字复用）
   client/
     index.ts                # client 半侧装配

@@ -63,6 +63,9 @@ const actions = {
   writePresetPets(draft: PetState, list: PresetPetItem[]): void {
     draft.presetPets = list
   },
+  writeChatPets(draft: PetState, list: PetListItem[]): void {
+    draft.chatPets = list
+  },
   writeCodexPets(draft: PetState, list: PetListItem[]): void {
     draft.codexPets = list
   },
@@ -138,6 +141,7 @@ export interface PetStoreFacade {
   setPresetPets: (list: PresetPetItem[]) => void
   setPetUpdates: (ids: string[]) => void
   replacePresetPet: (item: PresetPetItem) => void
+  setChatPets: (list: PetListItem[]) => void
   setCodexPets: (list: PetListItem[]) => void
   removePet: (id: string) => void
   setPrefill: (sessionId: string, draft: string) => void
@@ -190,6 +194,9 @@ export function createPetStoreFacade(instance: PetInstance): PetStoreFacade {
     },
     replacePresetPet(item): void {
       a.replacePresetPet(item)
+    },
+    setChatPets(list): void {
+      a.writeChatPets(list)
     },
     setCodexPets(list): void {
       a.writeCodexPets(list)

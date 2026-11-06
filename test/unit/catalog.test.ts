@@ -27,8 +27,8 @@ describe('host/catalog', () => {
 
   it('puts built-in entries first and drops registered duplicates', () => {
     const remote = [
-      { id: 'maid-deepseek-whale', name: 'Dup', config: 'x', uri: { default: 'y' } },
-      { id: 'custom-pet', name: 'Custom', config: 'x', uri: { default: 'y' } },
+      { id: 'maid-deepseek-whale', name: 'Dup', config: 'x', uri: { default: 'y' }, remote: true },
+      { id: 'custom-pet', name: 'Custom', config: 'x', uri: { default: 'y' }, remote: true },
     ]
     const merged = mergeCatalog(remote as never)
     expect(merged.filter(item => item.id === 'maid-deepseek-whale')).toHaveLength(1)

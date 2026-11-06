@@ -1,6 +1,7 @@
 import type { ClientAdapter } from '../sdk'
 import type { PetActionResult, PetListItem, PetStatus, PresetPetItem } from './pet.types'
 import {
+  CMD_CHECK_PET_UPDATES,
   CMD_DELETE_PET,
   CMD_GET_PET_STATUS,
   CMD_IMPORT_PET,
@@ -179,15 +180,15 @@ export async function createPetSession(input: {
   })
 }
 
-// --- 未实现的领域能力 -----------------------------------------------------
+// --- 仓库登记 / zip 导入 / 更新 / 删除 ------------------------------------
 //
-// 下面这些动作在上游由 Rust 侧实现（远端仓库登记、zip 解包导入、更新检查、外链打开）。
-// 本插件的宿主没有对应后端，因此**明确失败**并给出可辨识的错误码 —— 不像上一条注释
-// 那样静默返回 ok，避免设置页在「看起来能用」的状态下丢数据。
+// 与上游逐条同形：命令名、参数、副作用（刷新 store 清单）都一致，只是传输换成宿主 HTTP。
 
 export async function deletePet(input: { id: string }): Promise<PetActionResult> {
   return guard('delete pet', async () => {
-    await invoke(CMD_DELETE_PET, { id: input.id })
+    store.pet.setStatus(await invoke(CMD_DELETE_PET, { id: input.id }))
+    store.pet.removePet(input.id)
+    await loadPetCatalog()
     return { ok: true }
   })
 }
@@ -195,6 +196,8 @@ export async function deletePet(input: { id: string }): Promise<PetActionResult>
 export async function importPetArchive(input: { name: string, data: string }): Promise<PetActionResult> {
   return guard('import pet', async () => {
     await invoke(CMD_IMPORT_PET, { name: input.name, data: input.data })
+    const codexPets = await invoke<PetListItem[]>(CMD_LIST_PETS, { source: 'codex' })
+    store.pet.setCodexPets(codexPets)
     return { ok: true }
   })
 }
@@ -205,30 +208,35 @@ export async function importPetRepository(input: { repository: string }): Promis
     return { ok: false, error: 'PET_REPOSITORY_INVALID' }
   return guard('import pet repository', async () => {
     await invoke(CMD_IMPORT_PET_REPOSITORY, { repository: `${match[1]}/${match[2]}` })
+    store.pet.setPresetPets(await invoke<PresetPetItem[]>(CMD_LIST_PRESET_PETS))
     return { ok: true }
   })
 }
 
 export async function updatePetRepository(input: { id: string }): Promise<PetActionResult> {
   return guard('update pet repository', async () => {
-    await invoke(CMD_UPDATE_PET_REPOSITORY, { id: input.id })
+    const item = await invoke<PresetPetItem>(CMD_UPDATE_PET_REPOSITORY, { id: input.id })
+    store.pet.replacePresetPet({ ...item, remote: true })
     return { ok: true }
   })
 }
 
-/** Query：用户导入的宠物清单（本插件暂不支持导入，恒空）。 */
+/** Query：某一来源的文件系统宠物清单。 */
 export async function loadPetList(source: 'chat' | 'codex'): Promise<PetListItem[]> {
-  try {
-    return await invoke<PetListItem[]>(CMD_LIST_PETS, { source })
-  }
-  catch {
-    return []
-  }
+  const items = await invoke<PetListItem[]>(CMD_LIST_PETS, { source })
+  if (source === 'chat')
+    store.pet.setChatPets(items)
+  else
+    store.pet.setCodexPets(items)
+  return items
 }
 
 export async function loadPetUpdates(): Promise<PetActionResult> {
-  store.pet.setPetUpdates([])
-  return { ok: true }
+  return guard('check pet updates', async () => {
+    const ids = await invoke<string[]>(CMD_CHECK_PET_UPDATES)
+    store.pet.setPetUpdates(ids)
+    return { ok: true }
+  })
 }
 
 /**

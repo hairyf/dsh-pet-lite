@@ -36,6 +36,9 @@ export function apply(ctx: Context): void {
   /** 当前环境能否真的开一个独立窗口（纯浏览器访问时为 false）。 */
   const desktopSupported = (): boolean => hasGraphicalDisplay() && resolveElectronPath() !== undefined
 
+  /** 当前监听端口对应的本机 origin（素材 / 配置路由拼本机地址用）。 */
+  const origin = (): string => `http://127.0.0.1:${ctx.webServer.port ?? 0}`
+
   const openDesktop = async (): Promise<void> => {
     if (desktopOpen)
       return
@@ -88,6 +91,9 @@ export function apply(ctx: Context): void {
         await openDesktop()
       else
         await closeDesktop()
+    },
+    get origin() {
+      return origin()
     },
   }
 
