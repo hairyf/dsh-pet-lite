@@ -1,5 +1,5 @@
 - insert:
-    - id: pkg-placeholder
-      name: pkg-placeholder
+    - id: dsh-pet-lite
+      name: dsh-pet-lite
     - id: dsh-taiwind
       name: dsh-taiwind

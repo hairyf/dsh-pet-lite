@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DSH Pet Lite</title>
+    <!--
+      CSP：素材来自清单里的远端 https 主机，配置与状态来自宿主 origin（本机）。
+      `unsafe-inline` 是必需的 —— dsh-pet-component 经 css-render 注入样式表。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src * data: blob:; media-src * data: blob:; connect-src http://127.0.0.1:* http://localhost:* https:; font-src 'self' data:;"
+    />
+    <style>
+      /* 透明画布：整个页面必须透明，否则窗口会出现不透明底色。 */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        /* 整页不接收指针事件；只有宠物命中箱 opts 回来（与主界面浮层同一策略）。 */
+        pointer-events: none;
+        user-select: none;
+      }
+      #root {
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+      }
+      #error {
+        position: absolute;
+        left: 8px;
+        right: 8px;
+        bottom: 8px;
+        padding: 6px 10px;
+        border-radius: 8px;
+        background: rgba(0, 0, 0, 0.72);
+        color: #fff;
+        font: 12px/1.5 system-ui, sans-serif;
+        pointer-events: none;
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <div id="error"></div>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

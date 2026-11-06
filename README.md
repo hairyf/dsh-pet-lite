@@ -1,176 +1,143 @@
 <p align='center'>
-  <img src='public/hero.png' alt='DSH Plugin Starter - Opinionated Vite Starter Template' />
+  <img src='public/hero.png' alt='dsh-pet-lite' />
 </p>
 
-<h1 align='center'>DSH Plugin Starter</h1>
+<h1 align='center'>dsh-pet-lite</h1>
 
 <p align='center'>
-基于 <a href="https://github.com/deepseek-ai/dsh">DeepSeekRuntime</a> 的插件起步模板 — Host / Client 双端、按方法拆分的 HTTP 路由、构建在官方组件之上的 React UI，以及对真实 DSH 外壳的浏览器端 E2E。
+轻量桌宠插件：把 Tauri 桌面端的 pet 功能抽离成独立插件 —— 设置页分区、会话活动驱动的动画、
+以及一个透明置顶的 Electron 桌宠窗口。
 <br>
 <br>
-<a href="https://github.com/dsh-tauri/starter-plugin/generate"><strong>Use this template</strong></a>
+<a href="https://github.com/hairyf/dsh-pet-lite"><strong>Repository</strong></a>
 </p>
 
-<!-- Badge -->
-
-[![npm version][npm-version-src]][npm-version-href]
-[![npm downloads][npm-downloads-src]][npm-downloads-href]
-[![bundle][bundle-src]][bundle-href]
-[![JSDocs][jsdocs-src]][jsdocs-href]
 [![License][license-src]][license-href]
 
-## 特性
+## 这是什么
 
-- 🧩 **两段构建** — Host 插件与 Client 模块分开打包，由 [tsdown](https://tsdown.dev) 一次产出
-- 🗂️ **每个文件都有归处** — 共享类型、常量、HTTP 路由、组件、Slot id 各有既定位置，不会都堆进一个 `utils.ts`
-- 🖥️ **[dsh-h3](https://github.com/hairyf/dsh-h3) 路由** — `src/server/routes/` 下一个 HTTP 方法一个文件，通过 `defineWebServer` 挂载
-- ⚛️ **基于官方组件** — 组件集中在 `src/client/components`，复用 `@deepseek-ai/dsh-client-ui-*`，不重复造 UI
-- 🎨 **Tailwind** — `src/main.css` 未编译的 [dsh-taiwind](https://github.com/hairyf/dsh-taiwind) 入口，由 bundle patch 注入
-- 🧪 **真实浏览器 E2E** — 基于 [vitest/browser](https://vitest.dev/api/browser/commands.html) + Playwright 启动 DSH，并断言控制台零错误
-- 🧠 **所需技能已备齐** — 通过安装依赖将 Cordis 插件开发、composition 配置以及其他相关技能。
-- 🦾 **TypeScript strict、ESM、pnpm catalog、`@antfu/eslint-config`** — 当然
-- ⚙️ **三平台 CI** — Ubuntu / Windows / macOS + Node 24，另有 tag 触发的 npm 发布
-- 📦 **直接发布** — `exports`、`files` 与 `publint` 保证产物结构和类型声明可用
+从 [`deepseek-harness-desktop`](https://github.com/dsh-tauri-desk/deepseek-harness-desktop)
+的 `packages/builtin-plugin-pet` 抽离出来的独立插件。**功能与交互逐条复刻 Tauri 桌面端**，
+只把宿主边界换掉（见下方「与 Tauri 桌面端的差异」）。
 
-## 预置内容
+- **设置页分区** —— `settings.section` 里的桌宠页：预设卡片、启用/取消选择、大小滑条、抛射开关。
+- **会话活动动画** —— 订阅宿主 `session/event` 等总线事件，按六档工作状态
+  （thinking / working / result / waiting / success / error）切换宠物动作。
+- **透明置顶窗口** —— Electron 拉起的无边框透明窗口，整窗点击穿透，指针进宠物身体才可交互，
+  拖动时窗口跟随指针。
+- **渲染层复用同一组件** —— 窗口与 Tauri 桌面端使用**同一个** `dsh-pet-component`，
+  因此动作池、点击反馈、气泡、镜像是同一套实现。
 
-### Host 端
+## 与 Tauri 桌面端的差异
 
-| 依赖 | 用途 |
-| --- | --- |
-| `@deepseek-ai/cordis` | 插件运行时与 `apply(ctx)` 生命周期 |
-| `dsh-h3` / `h3` | HTTP 路由与请求处理 |
-| `@deepseek-ai/dsh-host-webserver` | `defineWebServer` 服务入口 |
-| `@deepseek-ai/dsh-tools`、`dsh-session`、`dsh-workspace` | 工具、会话与工作区服务 |
+抽离时必须替换的只有**宿主边界**，业务语义一行没改：
 
-### Client 端
+| 能力 | Tauri 桌面端 | dsh-pet-lite |
+| --- | --- | --- |
+| 前端调后端 | Tauri `invoke('get_pet_status')` | 同名命令 → `${ROUTE_PREFIX}/*` HTTP 路由 |
+| 窗口 | Rust 创建 webview 窗口 | Electron `BrowserWindow`（同透明/置顶/穿透属性） |
+| 会话状态 | 宿主 SSE → Rust `emit_to('pet')` | 直接消费宿主 SSE（`/session/stream`） |
+| 指针流 / 屏幕坐标 | `device-mouse-move` 原生设备流 | DOM `pointermove`（`clientX/clientY` 即窗口内容坐标） |
+| 状态容器 | valtio-define | 官方 `@deepseek-ai/dsh-client-store` |
+| UI 组件 | dsh-tauri-ui | 官方 `@deepseek-ai/dsh-client-ui-primitives` |
+| 设置持久化 | Rust `tauri-plugin-store` | `$DSH_HOME/pet-lite/pet.json`（原子写） |
 
-| 依赖 | 用途 |
-| --- | --- |
-| `@deepseek-ai/dsh-client-store` | 唯一允许使用的状态容器，不另建替代 Store |
-| `@deepseek-ai/dsh-client-ui-slots` | 以稳定 id 注册 Slot |
-| `@deepseek-ai/dsh-client-ui-primitives` | 官方组件，经 `components/official.ts` 统一导出 |
-| `@deepseek-ai/dsh-client-ui-{layout,conversation,session,settings,theme,workspace}` | 外壳暴露的全部 Slot 位置 |
+### 未实现（设置页会明确报错，不假装成功）
 
-两端的声明都在 `package.json` 里：`dsh.client.inject` 列出 client 需要的服务，`dsh.client.platform` 为 `web`，`dsh.bundle.patch` 指向 `cordis.patch.yml` —— 在那里注册你的插件 id 与 `dsh-taiwind`。
+远端仓库登记、zip 导入、更新检查、外链打开、强制 XWayland 开关 —— 这些在上游由 Rust 侧能力
+承担。本插件的宿主没有对应后端，因此对应动作用 `PET_UNSUPPORTED_COMMAND` 明确失败而不是静默
+返回成功。
 
-### 工具链
+## Electron 运行时从哪来
 
-| 依赖 | 用途 |
-| --- | --- |
-| [tsdown](https://tsdown.dev) | 双入口打包：ESM host + CJS client 工厂 |
-| [Vitest](https://vitest.dev) | unit project 与 Playwright 驱动的 e2e project |
-| [@antfu/eslint-config](https://github.com/antfu/eslint-config) | 代码风格与格式化，不用 Prettier |
-| [bumpp](https://github.com/antfu/bumpp) | 版本号提升与发布提交 |
+这是本插件与 `dsh-pet` 一致的地方。解析顺序（`src/host/electron-runtime.ts`）：
 
-## 快速开始
+1. `DSH_ELECTRON_PATH` —— 本插件自己的显式约定；
+2. `DSH_NODE` —— **宿主注入**：dsh-tauri 桌面端把「随包 Electron」的绝对路径放在这里
+   （`service/workflow/launch.rs`），直接复用，不必再下一次；
+3. 显式候选 / `DSH_PET_ELECTRON_PATH`；
+4. 本机 `electron` npm 包（`require('electron')`）；
+5. `$DSH_HOME/electron` —— 都没有时由 `@electron/get` 自动下载（默认 v43.3.0，npmmirror 镜像）。
 
-### 通过 Harness 创建
+第 1–2 条是本插件在 `dsh-pet` 三级候选之上**新增**的宿主注入；3–5 条与
+`dsh-pet` 的 `resolveElectronPath` 逐字一致。选这个顺序是因为：宿主注入是「我们确定能用」的
+最优解，但它一旦失效（用户删了 AppData、切了核心版本），`dsh-pet` 那几级候选仍能救回来。
 
-在 DeepSeekRuntime 里直接说需求，由 [dsh-plugin-creator](https://github.com/hairyf/skills) 这条 skill 用本模板建仓并实现：
+纯浏览器访问 DSH 时没有 Electron，`desktop_supported` 为 `false`，设置页不会出现窗口开关。
 
-安装技能：
+## 安装
 
 ```bash
-npx skills add hairyf/skills --skill dsh-plugin-creator -g
+dsh plugin --profile web add dsh-pet-lite
 ```
 
-> 在 Harness 中对话：/dsh-plugin-creator 做一个 XX 插件，目录放 `some/path`，仓库归属 `owner/repo`（public）
-
-它将覆盖插件全流程开发 —— 用模板建仓库、实现 Host / Client、本地校验、推送，以及盯 CI。
-
-## 使用
-
-### 开发
+或从源码装：
 
 ```bash
-pnpm run dev   # tsdown --watch，两端一起增量构建
-```
-
-调试时把插件装进一次性的 DSH profile，别装进你日常用的那个：
-
-```bash
+pnpm install --frozen-lockfile
 pnpm run build
 pnpm pack --pack-destination .tmp
 DSH_HOME=$(mktemp -d) dsh plugin --profile web add ./.tmp/*.tgz
 DSH_HOME="$DSH_HOME" dsh --profile web
 ```
 
-client 产物是 `dist/client.cjs`，加载器入口由 [tsdown.config.ts](./tsdown.config.ts) 里的 `banner` / `footer` 生成，因此工厂函数的导出不能丢。
+## HTTP 路由
 
-### 脚本
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/dsh-pet-lite/settings` | 当前状态快照（选择 / 启用 / 大小 / 抛射 / 桌面可用性） |
+| `PUT` | `/dsh-pet-lite/settings` | 更新上述字段，回吐**权威**状态并同步窗口开合 |
+| `GET` | `/dsh-pet-lite/catalog` | 预设清单 + 状态（设置页一次拿齐） |
+| `GET` | `/dsh-pet-lite/asset?id=` | 单个预设的渲染参数 |
+| `GET` | `/dsh-pet-lite/config?id=` | 预设配置代理（`file://` 页面避免 CORS） |
+| `GET` | `/dsh-pet-lite/session/stream` | 会话活动 SSE（`data:` 帧 + 心跳 + `state-lost`） |
+
+SSE 帧格式与上游逐字对齐；`retry: 1000` 只随首帧发出。
+
+## 目录
+
+```
+src/
+  index.ts                  # host 半侧：路由注册 + 桌面窗口生命周期
+  shared/                   # 三端共享常量与协议类型
+  host/
+    routes.ts               # 业务路由（原生 node:http）
+    catalog.ts presets.json # 内置预设清单（与 desktop manifest 同源）
+    store.ts                # 设置持久化（$DSH_HOME/pet-lite/pet.json）
+    electron-runtime.ts     # Electron 解析 + 进程守护（照搬 dsh-pet 优先级）
+    session-stream*.ts      # 会话总线 → 展示态投影（reducer 逐字复用）
+  client/
+    index.ts                # client 半侧装配
+    sdk.ts ui.tsx           # 边界适配层（dsh-tauri / dsh-tauri-ui 的同形子集）
+    components/ register/ service/ store/ locales/
+  renderer/index.tsx        # Electron 桌宠窗口渲染端（用 dsh-pet-component）
+runtime/electron-helper/    # Electron 主进程 + preload
+source/                     # 参考子模块：dsh-pet、deepseek-harness-desktop
+```
+
+`src/client/sdk.ts` 与 `src/client/ui.tsx` 是**唯一**为「SDK 未发布」而写的适配层，
+其余文件与上游 `builtin-plugin-pet` 同构。
+
+## 脚本
 
 | 脚本 | 作用 |
 | --- | --- |
-| `pnpm run dev` | 监听改动增量构建 |
-| `pnpm run build` | tsdown 构建两端产物 |
-| `pnpm run lint` | ESLint，加 `--fix` 自动修复 |
-| `pnpm run typecheck` | `tsc`，`noEmit` |
-| `pnpm run test` | 先构建，再跑两个 Vitest project |
-| `pnpm run release` | `bumpp` 提升版本、提交、打 tag |
+| `pnpm run build` | tsdown 打包 host / client / renderer，并复制 `presets.json` |
+| `pnpm run lint` | ESLint（`--fix` 自动修） |
+| `pnpm run typecheck` | `tsc --noEmit` |
+| `pnpm run test` | 构建后跑 Vitest（unit + 浏览器 E2E） |
 
-### 测试
+## 参考
 
-两个 Vitest project，按路径切分：
+- [`PC2005-cloud/dsh-pet`](https://github.com/PC2005-cloud/dsh-pet) —— Electron 路径解析与窗口语义来源
+- [`dsh-tauri-desk/deepseek-harness-desktop`](https://github.com/dsh-tauri-desk/deepseek-harness-desktop) —— `builtin-plugin-pet` 原始实现
+- [`dsh-pet-component`](https://github.com/dsh-tauri/dsh-pet-component) —— 渲染组件
 
-- **unit** —— `test/**/*.test.ts`，排除 `test/e2e`，快，不启浏览器。
-- **e2e** —— `test/e2e/**/*.{test,spec}.{ts,tsx}`，通过 `@vitest/browser-playwright` 在无头 Chromium 里串行执行。
-
-e2e 跑的是真实外壳：构建 → 打包 → 装进临时 `DSH_HOME` → 在空闲端口起 `dsh --profile web --no-open` → 用启动 token 换 `SameSite=Strict` Cookie → 断言页面无控制台错误。前置条件：
-
-```bash
-pnpm exec playwright install chromium
-pnpm add -g @deepseek-ai/dsh@0.2.1-rc.5
-```
-
-`dsh` 从 `PATH` 查找，或用 `DSH_E2E_DSH` / `DSHM_E2E_DSH` 指定。找不到时 e2e 会跳过，设 `DSH_E2E_REQUIRED=1` 则改为失败（CI 就是这样）。
-
-```bash
-pnpm run test -- --run                    # 全部
-pnpm exec vitest run --project unit       # 只跑单测
-pnpm exec vitest run --project e2e        # 只跑浏览器
-```
-
-交付前把整套门禁跑一遍：
-
-```bash
-pnpm run lint --fix
-pnpm run typecheck
-pnpm run test -- --run
-pnpm run build
-```
-
-## 发布
-
-模板默认走 [npm Trusted Publisher](https://github.com/e18e/ecosystem-issues/issues/201)：发布在 CI 上完成，产物可追溯到具体 tag。
-
-1. 首次用 `pnpm publish` 手工建包（此时还没有 Trusted Publisher）。
-2. 在 `https://www.npmjs.com/package/<name>/access` 绑定仓库。
-3. 之后 `pnpm run release` 打 tag 并推送，[`.github/workflows/release.yml`](./.github/workflows/release.yml) 凭 `id-token: write` 发布。
-
-分支 CI 是 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)：Ubuntu / Windows / macOS + Node 24 上跑 lint、typecheck、build 和测试。
-
-## 检查清单
-
-- [ ] `package.json` **和** `cordis.patch.yml` 里的 `pkg-placeholder` 替换
-- [ ] 替换 `_description_`、`author`、`homepage`、`repository`、`bugs`
-- [ ] 不需要的徽章不要删，发布 npm 后将自动更新
-- [ ] 第一次开 agent 会话前，确保 `pnpm install` 拉取需要的工作 `skills`
-- [ ] 只有真的从 `dist/` 发布才保留它，且永远不要手动修改
+两者以 git submodule 形式钉在 `source/` 下作为参考。
 
 ## License
 
-[MIT](./LICENSE.md) License © [dsh-tauri](https://github.com/dsh-tauri)
+[MIT](./LICENSE.md)
 
-<!-- Badges -->
-
-[npm-version-src]: https://img.shields.io/npm/v/pkg-placeholder?style=flat&colorA=080f12&colorB=1fa669
-[npm-version-href]: https://npmx.dev/package/pkg-placeholder
-[npm-downloads-src]: https://img.shields.io/npm/dm/pkg-placeholder?style=flat&colorA=080f12&colorB=1fa669
-[npm-downloads-href]: https://npmx.dev/package/pkg-placeholder
-[bundle-src]: https://img.shields.io/bundlephobia/minzip/pkg-placeholder?style=flat&colorA=080f12&colorB=1fa669&label=minzip
-[bundle-href]: https://bundlephobia.com/result?p=pkg-placeholder
-[license-src]: https://img.shields.io/github/license/dsh-tauri/starter-plugin.svg?style=flat&colorA=080f12&colorB=1fa669
-[license-href]: https://github.com/dsh-tauri/starter-plugin/blob/main/LICENSE.md
-[jsdocs-src]: https://img.shields.io/badge/jsdocs-reference-080f12?style=flat&colorA=080f12&colorB=1fa669
-[jsdocs-href]: https://www.jsdocs.io/package/pkg-placeholder
+[license-src]: https://img.shields.io/github/license/hairyf/dsh-pet-lite.svg?style=flat&colorA=080f12&colorB=1fa669
+[license-href]: https://github.com/hairyf/dsh-pet-lite/blob/main/LICENSE.md

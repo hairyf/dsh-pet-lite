@@ -15,11 +15,16 @@ packages:
   - examples/*
 
 allowBuilds:
+  dsh-pet-lite: true
   esbuild: true
-  pkg-placeholder: true
   playwright: true
   simple-git-hooks: true
 catalog:
+  '@electron-internal/extract-zip': ^1.0.5
+  '@electron/get': ^5.1.0
+  dsh-pet-component: ^0.2.5
+  dsh-tauri: ^0.6.7
+  dsh-tauri-ui: ^0.6.7
   tinyexec: ^1.3.1
 catalogs:
   cli:
@@ -77,6 +82,11 @@ catalogs:
     '@deepseek-ai/dsh-workspace': 0.2.1-rc.5
   inlined:
     '@antfu/utils': ^9.3.0
+  runtime:
+    '@types/react': ^19.2.2
+    '@types/react-dom': ^19.2.2
+    react: ^19.2.0
+    react-dom: ^19.2.0
   testing:
     '@vitest/browser-playwright': ^4.1.10
     playwright: ^1.62.1

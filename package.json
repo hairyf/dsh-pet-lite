@@ -1,18 +1,26 @@
 {
-  "name": "pkg-placeholder",
+  "name": "dsh-pet-lite",
   "type": "module",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "packageManager": "pnpm@11.15.1",
-  "description": "_description_",
+  "description": "Lightweight, self-contained desktop pet for DeepSeek Harness — an in-app floating pet driven by session activity, a settings panel, and a transparent always-on-top window that reuses the DSH host's Electron runtime (path resolution mirrors dsh-pet).",
   "author": "Hairy <wwu710632@gmail.com>",
   "license": "MIT",
-  "homepage": "https://github.com/dsh-tauri-desk/pkg-placeholder#readme",
+  "homepage": "https://github.com/hairyf/dsh-pet-lite#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dsh-tauri-desk/pkg-placeholder.git"
+    "url": "git+https://github.com/hairyf/dsh-pet-lite.git"
   },
-  "bugs": "https://github.com/dsh-tauri-desk/pkg-placeholder/issues",
-  "keywords": [],
+  "bugs": "https://github.com/hairyf/dsh-pet-lite/issues",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "desktop-pet",
+    "pet",
+    "electron",
+    "cordis"
+  ],
   "sideEffects": false,
   "exports": {
     ".": "./dist/index.js",
@@ -26,13 +34,15 @@
     "README.md",
     "cordis.patch.yml",
     "dist",
+    "runtime/electron-helper",
     "src/main.css"
   ],
   "dsh": {
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-ui-layout"
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-settings"
       ],
       "platform": "web"
     },
@@ -42,7 +52,7 @@
     "taiwind": "src/main.css"
   },
   "scripts": {
-    "build": "tsdown",
+    "build": "tsdown && node scripts/copy-assets.mjs",
     "dev": "tsdown --watch",
     "lint": "eslint",
     "prepack": "nr build",
@@ -65,8 +75,13 @@
     "prepare": "Set up git hooks and skills"
   },
   "dependencies": {
+    "@electron-internal/extract-zip": "catalog:",
+    "@electron/get": "catalog:",
     "dsh-h3": "catalog:utils",
+    "dsh-pet-component": "catalog:",
     "dsh-taiwind": "catalog:utils",
+    "dsh-tauri": "catalog:",
+    "dsh-tauri-ui": "catalog:",
     "h3": "catalog:utils"
   },
   "devDependencies": {
@@ -113,12 +128,16 @@
     "@genapi/pipeline": "catalog:cli",
     "@genapi/presets": "catalog:cli",
     "@types/node": "catalog:types",
+    "@types/react": "catalog:runtime",
+    "@types/react-dom": "catalog:runtime",
     "@vitest/browser-playwright": "catalog:testing",
     "bumpp": "catalog:cli",
     "eslint": "catalog:cli",
     "nano-staged": "catalog:cli",
     "playwright": "catalog:testing",
     "publint": "catalog:cli",
+    "react": "catalog:runtime",
+    "react-dom": "catalog:runtime",
     "simple-git-hooks": "catalog:cli",
     "skills-npm": "catalog:cli",
     "tinyexec": "catalog:",

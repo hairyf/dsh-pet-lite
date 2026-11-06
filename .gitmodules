@@ -1,0 +1,6 @@
+[submodule "source/dsh-pet"]
+	path = source/dsh-pet
+	url = https://github.com/PC2005-cloud/dsh-pet
+[submodule "source/deepseek-harness-desktop"]
+	path = source/deepseek-harness-desktop
+	url = https://github.com/dsh-tauri-desk/deepseek-harness-desktop
