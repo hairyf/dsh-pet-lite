@@ -21,6 +21,13 @@ export interface PetRuntimeStatus extends PetStatus {
   desktop_supported: boolean
   /** 是否已打开独立窗口。 */
   desktop_open: boolean
+  /**
+   * 「显示主界面」要打开的地址。
+   *
+   * 桌面端宿主（官方 dsh-tauri）是 `dsh://open`；纯网页宿主回落到自己的地址。
+   * 空字符串表示无从唤起，桌宠右键菜单据此隐藏该项（不摆一个点了没反应的条目）。
+   */
+  open_url: string
 }
 
 /** 宠物来源：用户导入（chat）/ Codex 图集。 */

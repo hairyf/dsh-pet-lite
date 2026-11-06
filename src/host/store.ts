@@ -182,7 +182,7 @@ export function resetRemoteCache(): void {
  *
  * `visible` 不是持久字段：无选择时必然不可见（没有内容可渲染，不留空窗口）。
  */
-export function snapshot(input: { desktopSupported: boolean, desktopOpen: boolean }): PetRuntimeStatus {
+export function snapshot(input: { desktopSupported: boolean, desktopOpen: boolean, openUrl?: string }): PetRuntimeStatus {
   const value = state()
   const status: PetStatus = {
     active_pet: value.active_pet,
@@ -195,5 +195,6 @@ export function snapshot(input: { desktopSupported: boolean, desktopOpen: boolea
     ...status,
     desktop_supported: input.desktopSupported,
     desktop_open: input.desktopOpen,
+    open_url: input.openUrl ?? '',
   }
 }

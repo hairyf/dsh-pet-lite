@@ -13,6 +13,17 @@ export const ROUTE_PREFIX = '/dsh-pet-lite'
 /** 会话增量 SSE 流：`${ROUTE_PREFIX}${SESSION_STREAM_PATH}`。 */
 export const SESSION_STREAM_PATH = '/session/stream'
 
+/**
+ * 「显示主界面」用的 deep link（与官方桌面端同一个协议）。
+ *
+ * 官方桌面端在 `desktop/deep_link.rs` 里注册并处理它，`is_open_request` **精确匹配**
+ * `dsh://open` 与 `dsh://open/`（带 query 不认）。这里只发这一个固定串，不做任何拼接。
+ *
+ * 夜间版注册的是 `dsh-nightly`；两者不共存于同一台机器的默认处理器，因此这里取正式版，
+ * 夜间版宿主下该项会由宿主返回的 `open_url` 覆盖。
+ */
+export const DESKTOP_OPEN_URL = 'dsh://open'
+
 /** 统一设置读取 / 写入。 */
 export const SETTINGS_PATH = '/settings'
 

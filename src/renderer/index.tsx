@@ -15,7 +15,7 @@
  */
 
 import type { DshPetConfig, MotionInput, PetRef } from 'dsh-pet-component'
-import type { PetAsset, PetRuntimeStatus, PetSessionPayload, PetStatus, PetWorkStatus } from '../shared/types'
+import type { PetAsset, PetRuntimeStatus, PetSessionPayload, PetWorkStatus } from '../shared/types'
 import type { DragSample, PhysicsParams, ThrowBounds, ThrowState } from './physics'
 import { Pet, useControllablePet } from 'dsh-pet-component'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -66,6 +66,10 @@ interface PetBridge {
   setDragging: (dragging: boolean) => void
   setInteractive: (interactive: boolean) => void
   setSize: (sizePercent: number) => void
+  /** 弹出右键菜单（显示主界面 / 关闭宠物）。 */
+  showMenu: (payload: { openUrl?: string, showLabel?: string, closeLabel?: string }) => void
+  /** 订阅菜单点击。返回取消订阅函数。 */
+  onMenuAction: (handler: (action: string) => void) => () => void
 }
 
 declare global {
@@ -107,7 +111,7 @@ function clearError(): void {
     node.style.display = 'none'
 }
 
-async function fetchStatus(): Promise<PetStatus> {
+async function fetchStatus(): Promise<PetRuntimeStatus> {
   const response = await fetch(`${ORIGIN}/dsh-pet-lite/settings`, { cache: 'no-store' })
   if (!response.ok)
     throw new Error(`PET_STATUS_FAILED: ${response.status}`)
@@ -165,7 +169,7 @@ function App(): React.ReactElement | null {
   const pet = useControllablePet(petRef)
   const hitboxRef = useRef<HTMLDivElement>(null)
 
-  const [status, setStatus] = useState<PetStatus | null>(null)
+  const [status, setStatus] = useState<PetRuntimeStatus | null>(null)
   const [asset, setAsset] = useState<PetAsset | null>(null)
   const [motion, setMotion] = useState<MotionInput>('idle')
   const [dragging, setDragging] = useState(false)
@@ -453,6 +457,45 @@ function App(): React.ReactElement | null {
     return () => window.removeEventListener('pointermove', handlePointerMove)
   }, [])
 
+  // --- 右键菜单 --------------------------------------------------------
+  //
+  // 两项与 Tauri 桌面端 `pet_show_context_menu` 对齐（见 main.cjs 的 `pet:show-menu`）：
+  //   - 显示主界面 → 打开宿主给的 `open_url`（官方桌面端是 `dsh://open`）；
+  //   - 关闭宠物 → 走内部设置写入，和设置页里点「关闭宠物」同一条路径。
+  const onContextMenu = useCallback((event: React.MouseEvent) => {
+    event.preventDefault()
+    // 刚拖完不弹菜单：dsh-pet 同样用 `justDragged` 挡这一下，避免松手误触。
+    if (dragStateRef.current.active)
+      return
+    window.petBridge?.showMenu({
+      openUrl: status?.open_url ?? '',
+      showLabel: '显示主界面',
+      closeLabel: '关闭宠物',
+    })
+  }, [status?.open_url])
+
+  /** 菜单里选「关闭宠物」：写持久化设置，宿主随即注销窗口。 */
+  const closePet = useCallback(async () => {
+    try {
+      await fetch(`${ORIGIN}/dsh-pet-lite/settings`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ enabled: false }),
+      })
+    }
+    catch (error) {
+      showError(`关闭宠物失败：${messageOf(error)}`)
+    }
+  }, [])
+
+  useEffect(() => {
+    const dispose = window.petBridge?.onMenuAction((action) => {
+      if (action === 'close-pet')
+        void closePet()
+    })
+    return () => dispose?.()
+  }, [closePet])
+
   // --- 渲染 ------------------------------------------------------------
 
   const config = useMemo<DshPetConfig | string | null>(() => {
@@ -493,6 +536,7 @@ function App(): React.ReactElement | null {
         onHitboxPointerUp={endDrag}
         onHitboxPointerCancel={endDrag}
         onDoubleClick={() => pet.motion({ type: 'waving' })}
+        onContextMenu={onContextMenu}
         onError={error => showError(`宠物素材加载失败：${messageOf(error)}`)}
       />
     </div>

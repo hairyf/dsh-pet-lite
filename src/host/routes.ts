@@ -5,6 +5,7 @@ import { existsSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   CATALOG_PATH,
+  DESKTOP_OPEN_URL,
   ROUTE_PREFIX,
   SESSION_STREAM_PATH,
   SETTINGS_PATH,
@@ -84,9 +85,18 @@ async function readJson<T>(req: IncomingMessage, res: ServerResponse): Promise<T
   }
 }
 
-/** 当前状态快照（每次请求实时读取）。 */
+/**
+ * 当前状态快照（每次请求实时读取）。
+ *
+ * `open_url` 是「显示主界面」要打开的目标：
+ *   - 独立窗口跑在桌面端宿主里时用官方协议 `dsh://open`（`desktop/deep_link.rs`
+ *     精确匹配它，官方桌面端据此把主窗口带到前台）；
+ *   - 纯网页宿主回落到自己的 origin（浏览器里由谁接住取决于宿主，给 origin 最保守）；
+ *   - 都没有就留空，渲染端据此隐藏该菜单项。
+ */
 function runtimeStatus(ctx: RouteContext): PetRuntimeStatus {
-  return snapshot({ desktopSupported: ctx.desktopSupported, desktopOpen: ctx.desktopOpen })
+  const openUrl = ctx.desktopOpen || ctx.desktopSupported ? DESKTOP_OPEN_URL : ctx.origin
+  return snapshot({ desktopSupported: ctx.desktopSupported, desktopOpen: ctx.desktopOpen, openUrl })
 }
 
 /** 一次拿齐三份清单 + 状态（= `list_preset_pets` + `list_pets(chat)` + `list_pets(codex)`）。 */

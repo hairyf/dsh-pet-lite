@@ -272,6 +272,16 @@ const PLUGIN_ID = "dsh-pet-lite";
 const ROUTE_PREFIX = "/dsh-pet-lite";
 /** 会话增量 SSE 流：`${ROUTE_PREFIX}${SESSION_STREAM_PATH}`。 */
 const SESSION_STREAM_PATH = "/session/stream";
+/**
+* 「显示主界面」用的 deep link（与官方桌面端同一个协议）。
+*
+* 官方桌面端在 `desktop/deep_link.rs` 里注册并处理它，`is_open_request` **精确匹配**
+* `dsh://open` 与 `dsh://open/`（带 query 不认）。这里只发这一个固定串，不做任何拼接。
+*
+* 夜间版注册的是 `dsh-nightly`；两者不共存于同一台机器的默认处理器，因此这里取正式版，
+* 夜间版宿主下该项会由宿主返回的 `open_url` 覆盖。
+*/
+const DESKTOP_OPEN_URL = "dsh://open";
 /** 统一设置读取 / 写入。 */
 const SETTINGS_PATH = "/settings";
 /** 预设 / Chat / Codex 三份清单。 */
@@ -409,7 +419,8 @@ function snapshot(input) {
 		throw_enabled: value.throw_enabled,
 		visible: value.enabled && value.active_pet !== "",
 		desktop_supported: input.desktopSupported,
-		desktop_open: input.desktopOpen
+		desktop_open: input.desktopOpen,
+		open_url: input.openUrl ?? ""
 	};
 }
 //#endregion
@@ -1916,11 +1927,21 @@ async function readJson(req, res) {
 		return;
 	}
 }
-/** 当前状态快照（每次请求实时读取）。 */
+/**
+* 当前状态快照（每次请求实时读取）。
+*
+* `open_url` 是「显示主界面」要打开的目标：
+*   - 独立窗口跑在桌面端宿主里时用官方协议 `dsh://open`（`desktop/deep_link.rs`
+*     精确匹配它，官方桌面端据此把主窗口带到前台）；
+*   - 纯网页宿主回落到自己的 origin（浏览器里由谁接住取决于宿主，给 origin 最保守）；
+*   - 都没有就留空，渲染端据此隐藏该菜单项。
+*/
 function runtimeStatus(ctx) {
+	const openUrl = ctx.desktopOpen || ctx.desktopSupported ? DESKTOP_OPEN_URL : ctx.origin;
 	return snapshot({
 		desktopSupported: ctx.desktopSupported,
-		desktopOpen: ctx.desktopOpen
+		desktopOpen: ctx.desktopOpen,
+		openUrl
 	});
 }
 /** 一次拿齐三份清单 + 状态（= `list_preset_pets` + `list_pets(chat)` + `list_pets(codex)`）。 */

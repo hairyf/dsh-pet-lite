@@ -40,4 +40,14 @@ contextBridge.exposeInMainWorld('petBridge', {
   openExternal(url) {
     ipcRenderer.send('pet:open-external', String(url))
   },
+  /** 弹出桌宠右键菜单（显示主界面 / 关闭宠物）。 */
+  showMenu(payload) {
+    ipcRenderer.send('pet:show-menu', payload ?? {})
+  },
+  /** 订阅菜单点击（主进程 → 渲染端）。返回取消订阅函数。 */
+  onMenuAction(handler) {
+    const listener = (_event, action) => handler(String(action))
+    ipcRenderer.on('pet:menu-action', listener)
+    return () => ipcRenderer.removeListener('pet:menu-action', listener)
+  },
 })

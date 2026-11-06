@@ -17,7 +17,7 @@
 
 const path = require('node:path')
 const process = require('node:process')
-const { app, BrowserWindow, ipcMain, screen } = require('electron')
+const { app, BrowserWindow, ipcMain, Menu, screen, shell } = require('electron')
 
 // 允许无用户手势直接播放（桌宠动画一加载就要动）。
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
@@ -197,6 +197,58 @@ ipcMain.on('pet:set-interactive', (event, interactive) => {
   setWindowIgnore(target, !interactive)
 })
 
+// --- 右键菜单 ----------------------------------------------------------
+
+/**
+ * 桌宠右键菜单：显示主界面 / 关闭宠物。
+ *
+ * 与 Tauri 桌面端 `pet_show_context_menu`（`bridge/pet.rs`）同一组项、同一语义：
+ *   - **显示主界面** → 打开 `dsh://open`。这是官方桌面端注册并处理的协议
+ *     （`desktop/deep_link.rs` 的 `is_open_request` 精确匹配 `dsh://open` 与
+ *     `dsh://open/`），所以用系统协议唤起，不自己去翻窗口句柄 —— 官方桌面端、
+ *     以及任何注册了该协议的宿主都能接住。
+ *   - **关闭宠物** → 走本插件内部的设置写入（渲染端 PUT `/settings`），
+ *     与设置页里点「关闭宠物」是同一条路径，同样持久化。
+ *
+ * 用 Electron 原生 `Menu.popup` 而非窗口内自绘：窗口是点击穿透的，自绘菜单还得
+ * 额外维护一整块命中区；原生菜单三平台一致，也不会被窗口边界裁掉。
+ */
+ipcMain.on('pet:show-menu', (event, payload) => {
+  const target = BrowserWindow.fromWebContents(event.sender)
+  if (!target || target.isDestroyed())
+    return
+  // 菜单是窗口内交互：弹出期间保持可交互，否则点不到菜单项。
+  setWindowIgnore(target, false)
+  const openUrl = typeof payload?.openUrl === 'string' && payload.openUrl ? payload.openUrl : ''
+  const template = []
+  // 宿主没给 openUrl（例如独立运行、没有桌面端）时只留「关闭宠物」，不摆一个点了没反应的项。
+  if (openUrl) {
+    template.push({
+      label: payload?.showLabel ?? '显示主界面',
+      click: () => {
+        // 走系统协议：由注册了该协议的宿主把主窗口带到前台。
+        void shell.openExternal(openUrl).catch(() => {})
+      },
+    })
+  }
+  template.push({
+    label: payload?.closeLabel ?? '关闭宠物',
+    click: () => {
+      target.webContents.send('pet:menu-action', 'close-pet')
+    },
+  })
+  const menu = Menu.buildFromTemplate(template)
+  menu.popup({
+    window: target,
+    // 关闭（点外部 / Esc）后交还命中判定，下一次 pointermove 会重新算可交互性。
+    // 拖拽中不翻穿透（`dragging` 由下面的 pet:set-dragging 维护）。
+    callback: () => {
+      if (!target.isDestroyed() && !isDragging())
+        setWindowIgnore(target, true)
+    },
+  })
+})
+
 // --- 拖拽期的主进程兜底 ------------------------------------------------
 //
 // 【为什么必须有】窗口只有宠物那么大（几百 px）。拖动时指针很快跑到窗口外，而整窗是
@@ -208,6 +260,11 @@ ipcMain.on('pet:set-interactive', (event, interactive) => {
 // （`pointer-target.js` 的 `decideWindowIgnore`）。这里做同一件事：
 // 渲染端拖拽/飞行期间上报 `pet:set-dragging`，主进程据此**暂停**命中判定。
 let dragging = false
+
+/** 当前是否在拖拽/飞行中（菜单回调要读它，但它在文件后半段才声明）。 */
+function isDragging() {
+  return dragging
+}
 
 ipcMain.on('pet:set-dragging', (event, value) => {
   dragging = Boolean(value)
