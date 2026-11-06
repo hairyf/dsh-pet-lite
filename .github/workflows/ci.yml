@@ -1,0 +1,38 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  test:
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node-version: ['24']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Setup JS
+        uses: sxzz/workflows/setup-js@main
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install DSH and Playwright
+        run: pnpm install -g @deepseek-ai/dsh@0.2.1-rc.5 && pnpm exec playwright install chromium
+
+      - name: Lint and typecheck
+        run: pnpm run lint && pnpm run typecheck
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Test
+        run: pnpm run test -- --run
+        env:
+          DSH_E2E_REQUIRED: '1'

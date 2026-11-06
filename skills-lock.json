@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "skills": {
+    "testing": {
+      "source": "./skills",
+      "sourceType": "local",
+      "computedHash": "d850ba10a19b93548c8d16f0bead6959a1ff6f8ddac8ffee9fc1cc6454bc7880"
+    },
+    "unjs": {
+      "source": "hairyf/skills",
+      "sourceType": "github",
+      "skillPath": "skills/unjs/SKILL.md",
+      "computedHash": "5c989509bc08d22e3345db8c3d626fec701a1a68e32c7663e6de0b898eff01ff"
+    }
+  }
+}
