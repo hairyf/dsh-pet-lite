@@ -1,12 +1,12 @@
-<p align='center'>
+<!-- <p align='center'>
   <img src='public/hero.png' alt='dsh-pet-lite' />
-</p>
+</p> -->
 
 <h1 align='center'>dsh-pet-lite</h1>
 
 <p align='center'>
-轻量桌宠插件：把 Tauri 桌面端的 pet 功能抽离成独立插件 —— 设置页分区、会话活动驱动的动画，
-以及一个透明置顶的 Electron 桌宠窗口。**只做独立窗口，不做网页内宠物。**
+轻量桌宠插件：支持 Tauri/Electron 桌面端的 pet 功能抽离成独立插件 —— 设置页分区、会话活动驱动的动画，
+一个透明置顶的桌宠窗口。**只做独立窗口，不做网页内宠物。**
 <br>
 <br>
 <a href="https://github.com/hairyf/dsh-pet-lite"><strong>Repository</strong></a>
