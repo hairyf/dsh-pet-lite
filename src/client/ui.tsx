@@ -26,6 +26,7 @@ import {
   SegmentedControl as OfficialSegmentedControl,
   Switch as OfficialSwitch,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Ghost as GhostArtwork } from './ghost'
 
 /** 官方图标的通用形状（`{ size?, className? }`）。 */
 export interface IconArtworkProps {
@@ -133,7 +134,7 @@ export function Icon(props: { as?: ComponentType<IconArtworkProps>, className?: 
 export const Plus = IconPlusOutlineRegular
 export const Globe = IconGlobeOutlineRegular
 export const TrashBin = IconTrashOutlineRegular
-/** 上游菜单项图标（幽灵）：官方没有同名图标，用「新增/标记」类中性图形替代。 */
-export const Ghost = IconPlusOutlineRegular
+/** 上游菜单项图标（幽灵）：Gravity UI Ghost 单资源本地组件，不引入图标包依赖。 */
+export const Ghost = GhostArtwork
 /** 上游外链图标：同上，用地球图标表达「跳转外部站点」。 */
 export const ArrowRightFromSquare = IconGlobeOutlineRegular

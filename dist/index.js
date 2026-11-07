@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, s
 import { dirname, join, resolve, sep } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import "@electron-internal/extract-zip";
-import "@electron/get";
+import extract from "@electron-internal/extract-zip";
+import { downloadArtifact } from "@electron/get";
 import { Buffer } from "node:buffer";
 import { homedir } from "node:os";
 import { readFile } from "node:fs/promises";
@@ -90,9 +90,9 @@ function resolveElectronPath(candidates = []) {
 		seen.add(value);
 		list.push(value);
 	};
-	for (const value of hostInjectedCandidates()) push(value);
 	for (const value of candidates) push(value);
 	if (process.env.DSH_PET_ELECTRON_PATH) push(process.env.DSH_PET_ELECTRON_PATH);
+	for (const value of hostInjectedCandidates()) push(value);
 	try {
 		const resolved = require("electron");
 		if (typeof resolved === "string" && resolved) push(resolved);
@@ -111,6 +111,52 @@ function hasGraphicalDisplay() {
 	if (process.platform !== "linux") return true;
 	if (process.env.DSH_PET_DESKTOP_FORCE === "1") return true;
 	return Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+}
+/**
+* 进程内下载并解压 Electron 到 `$DSH_HOME/electron`。
+*
+* 不 spawn 子进程：在 CLI node 与 Electron 宿主里都可用。已存在则原样返回；
+* 失败返回 undefined（不影响 DSH 与浏览器内浮层）。
+*/
+async function ensureElectronDownload(options = {}) {
+	const version = options.version || process.env.DSH_PET_ELECTRON_VERSION || "43.3.0";
+	const mirror = options.mirror || process.env.DSH_PET_ELECTRON_MIRROR || "https://npmmirror.com/mirrors/electron/";
+	const timeoutMs = options.timeoutMs ?? 600 * 1e3;
+	const targetDir = electronLandingDir();
+	const exe = defaultElectronExe();
+	if (existsSync(exe)) return exe;
+	const log = (message) => {
+		process.stdout.write(`[dsh-pet-lite] ${message}\n`);
+	};
+	const startedAt = Date.now();
+	log(`Electron not found, downloading v${version} (${PLAT}-${process.arch}) ...`);
+	mkdirSync(targetDir, { recursive: true });
+	try {
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(/* @__PURE__ */ new Error(`Electron download timed out after ${timeoutMs}ms`)), timeoutMs);
+		timer.unref?.();
+		try {
+			const zipPath = await downloadArtifact({
+				version: `v${version}`,
+				artifactName: "electron",
+				mirrorOptions: { mirror: `${mirror.replace(/\/$/, "")}/` },
+				downloadOptions: {
+					signal: controller.signal,
+					quiet: true
+				}
+			});
+			log(`download complete (${((Date.now() - startedAt) / 1e3).toFixed(1)}s), extracting to ${targetDir} ...`);
+			await extract(zipPath, { dir: targetDir });
+			if (!existsSync(exe)) throw new Error(`Electron zip extracted, but ${ELECTRON_REL} not found`);
+			log(`ready in ${((Date.now() - startedAt) / 1e3).toFixed(1)}s: ${exe}`);
+			return exe;
+		} finally {
+			clearTimeout(timer);
+		}
+	} catch (error) {
+		console.warn(`[dsh-pet-lite] ensure failed: ${error instanceof Error ? error.message : String(error)}`);
+		return;
+	}
 }
 /** 拉起参数：`command = <electron> args = [main.js]`（与 dsh-pet 一致）。 */
 function defaultLaunch(options = {}) {
@@ -1987,7 +2033,10 @@ const patchRoute = {
 		});
 		try {
 			await syncDesktop(ctx, next.enabled && next.active_pet !== "");
-		} catch {}
+		} catch (error) {
+			sendText(res, 502, `PET_DESKTOP_START_FAILED: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
 		sendJson(res, 200, runtimeStatus(ctx));
 	}
 };
@@ -2350,7 +2399,7 @@ function apply(ctx) {
 		if (!desktopSupported()) throw new Error("PET_DESKTOP_UNAVAILABLE: no usable Electron runtime");
 		const port = ctx.webServer.port ?? 0;
 		if (!port || port <= 0) throw new Error("PET_WEB_PORT_UNAVAILABLE: web server is not listening yet");
-		const electronPath = resolveElectronPath();
+		const electronPath = await ensureElectronDownload() ?? resolveElectronPath();
 		if (!electronPath) throw new Error("PET_DESKTOP_UNAVAILABLE: no usable Electron runtime");
 		const process_ = new HelperProcess({
 			electronPath,

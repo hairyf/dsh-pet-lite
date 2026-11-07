@@ -4,7 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { RouteContext } from './host/routes'
-import { hasGraphicalDisplay, HelperProcess, resolveElectronPath } from './host/electron-runtime'
+import { ensureElectronDownload, hasGraphicalDisplay, HelperProcess, resolveElectronPath } from './host/electron-runtime'
 import { matchRoute, notFound } from './host/routes'
 import { attachHost } from './host/session-stream'
 import { snapshot } from './host/store'
@@ -47,7 +47,7 @@ export function apply(ctx: Context): void {
     const port = ctx.webServer.port ?? 0
     if (!port || port <= 0)
       throw new Error('PET_WEB_PORT_UNAVAILABLE: web server is not listening yet')
-    const electronPath = resolveElectronPath()
+    const electronPath = await ensureElectronDownload() ?? resolveElectronPath()
     if (!electronPath)
       throw new Error('PET_DESKTOP_UNAVAILABLE: no usable Electron runtime')
     const process_ = new HelperProcess(

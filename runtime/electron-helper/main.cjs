@@ -98,6 +98,10 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: false,
       spellcheck: false,
+      // The page is loaded from file:// while all pet data comes from the DSH host
+      // on 127.0.0.1. Chromium otherwise blocks fetch() with "Failed to fetch" because
+      // loadFile has a null origin; this window only talks to the injected local origin.
+      webSecurity: false,
     },
   })
 

@@ -148,8 +148,11 @@ const patchRoute: Route = {
     try {
       await syncDesktop(ctx, next.enabled && next.active_pet !== '')
     }
-    catch {
-      /* 窗口开合失败不改变已落盘的选择 */
+    catch (error) {
+      // Window startup failure must be visible. Persisted user intent remains unchanged
+      // only in memory, so reporting the failure prevents the UI from showing a false success.
+      sendText(res, 502, `PET_DESKTOP_START_FAILED: ${error instanceof Error ? error.message : String(error)}`)
+      return
     }
     sendJson(res, 200, runtimeStatus(ctx))
   },

@@ -105,14 +105,14 @@ export function resolveElectronPath(candidates: Array<string | undefined> = []):
     seen.add(value)
     list.push(value)
   }
-  // 0. 宿主注入（本插件新增的一条，排在 dsh-pet 全部候选之前）。
-  for (const value of hostInjectedCandidates())
-    push(value)
   // 1. 显式候选 / DSH_PET_ELECTRON_PATH
   for (const value of candidates)
     push(value)
   if (process.env.DSH_PET_ELECTRON_PATH)
     push(process.env.DSH_PET_ELECTRON_PATH)
+  // 0. 宿主注入（本插件新增的一条，排在 dsh-pet 兜底候选之前）。
+  for (const value of hostInjectedCandidates())
+    push(value)
   // 2. 本机 electron npm 包
   try {
     const resolved = require('electron')
