@@ -34,6 +34,40 @@
           "default": "webm",
           "mac": "mov"
         }
+      },
+      {
+        "id": "dsh-claude-pet",
+        "name": "Claude",
+        "desc": "优雅又严谨的橙发程序员 Claude。拥有 166 种灵动姿态，伴随书本与思考动画，让你的桌面多了一位严格把关的小伙伴。",
+        "image": "https://raw.githubusercontent.com/hairyf/dsh-pet-gpt/refs/heads/main/preview/preview.gif",
+        "kind": "dsh",
+        "size": 220,
+        "config": "https://raw.githubusercontent.com/hairyf/dsh-pet-gpt/refs/heads/main/config.jsonc",
+        "uri": {
+          "default": "https://raw.githubusercontent.com/hairyf/dsh-pet-gpt/refs/heads/main/webm",
+          "mac": "https://raw.githubusercontent.com/hairyf/dsh-pet-gpt/refs/heads/main/mov"
+        },
+        "ext": {
+          "default": "webm",
+          "mac": "mov"
+        }
+      },
+      {
+        "id": "dsh-gpt-pet",
+        "name": "Chat GPT",
+        "desc": "自带 193 种百变萌态的‘龙娘’。头顶威严龙角、身着精致奇幻服饰，虽然偶尔会有点迷糊，但依然会安安静静地盘踞在你的屏幕边缘陪着你。",
+        "image": "https://raw.githubusercontent.com/hairyf/dsh-pet-gpt/refs/heads/main/preview/preview.gif",
+        "kind": "dsh",
+        "size": 220,
+        "config": "https://raw.githubusercontent.com/hairyf/dsh-pet-gpt/refs/heads/main/config.jsonc",
+        "uri": {
+          "default": "https://raw.githubusercontent.com/hairyf/dsh-pet-gpt/refs/heads/main/webm",
+          "mac": "https://raw.githubusercontent.com/hairyf/dsh-pet-gpt/refs/heads/main/mov"
+        },
+        "ext": {
+          "default": "webm",
+          "mac": "mov"
+        }
       }
     ]
   }
