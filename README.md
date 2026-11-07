@@ -1,4 +1,5 @@
-<div align="center"><a name="readme-top"></a>
+<div align="center">
+  
 # DSH Pet Lite
   
 [![npm version][npm-version-src]][npm-version-href]
