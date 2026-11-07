@@ -1,7 +1,7 @@
 {
   "name": "dsh-pet-lite",
   "type": "module",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "packageManager": "pnpm@11.15.1",
   "description": "Lightweight, self-contained desktop pet for DeepSeek Harness — an in-app floating pet driven by session activity, a settings panel, and a transparent always-on-top window that reuses the DSH host's Electron runtime (path resolution mirrors dsh-pet).",
   "author": "Hairy <wwu710632@gmail.com>",
