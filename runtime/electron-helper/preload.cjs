@@ -32,10 +32,6 @@ contextBridge.exposeInMainWorld('petBridge', {
   setInteractive(interactive) {
     ipcRenderer.send('pet:set-interactive', !!interactive)
   },
-  /** 调整窗口大小（size 百分比 50–200）。 */
-  setSize(sizePercent) {
-    ipcRenderer.send('pet:set-size', sizePercent)
-  },
   /** 在系统浏览器打开外链。 */
   openExternal(url) {
     ipcRenderer.send('pet:open-external', String(url))

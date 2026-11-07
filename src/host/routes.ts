@@ -9,6 +9,7 @@ import {
   ROUTE_PREFIX,
   SESSION_STREAM_PATH,
   SETTINGS_PATH,
+  SETTINGS_STREAM_PATH,
   SSE_KEEPALIVE_MS,
 } from '../shared/constants'
 import { fullCatalog, presetAsset, registerRemotePet, replaceRemotePet, unregisterRemotePet } from './catalog'
@@ -16,6 +17,7 @@ import { findPetDirectory, listPets, parseQualifiedId, petsDir, readSpritesheet,
 import { importPetArchive } from './pet-import'
 import { checkPetUpdates, importPetRepository, updatePetRepository } from './pet-repo'
 import { sessionStream } from './session-stream'
+import { attachSettings, publishSettings } from './settings-stream'
 import { snapshot, update } from './store'
 
 /**
@@ -145,8 +147,10 @@ const patchRoute: Route = {
       pet_size: patch.pet_size,
       throw_enabled: patch.throw_enabled,
     })
+    let status: PetRuntimeStatus
     try {
       await syncDesktop(ctx, next.enabled && next.active_pet !== '')
+      status = runtimeStatus(ctx)
     }
     catch (error) {
       // Window startup failure must be visible. Persisted user intent remains unchanged
@@ -154,7 +158,10 @@ const patchRoute: Route = {
       sendText(res, 502, `PET_DESKTOP_START_FAILED: ${error instanceof Error ? error.message : String(error)}`)
       return
     }
-    sendJson(res, 200, runtimeStatus(ctx))
+    // 已打开的窗口必须立刻知道「大小 / 抛射 / 选择」变了 —— 否则它要等下次重启才跟上
+    // （滑条拖了宠物不变、抛射关了还在飞，都是这条推送缺席的表现）。
+    publishSettings(status)
+    sendJson(res, 200, status)
   },
 }
 
@@ -560,8 +567,71 @@ const streamRoute: Route = {
   },
 }
 
+/**
+ * GET /settings/stream — 设置变更 SSE 流（给已打开的桌宠窗口）。
+ *
+ * 帧格式与 `/session/stream` 一致（`data: <json>\n\n` + 心跳 + 首帧 `retry`），
+ * 只是载荷是 `PetSettingsFrame`。接入时先推一帧当前状态：消费者永远不需要自己再
+ * `GET /settings` 一次，也就不会出现「拿到的是旧值」的竞态。
+ */
+const settingsStreamRoute: Route = {
+  method: 'GET',
+  path: `${ROUTE_PREFIX}${SETTINGS_STREAM_PATH}`,
+  handle(req, res, _url, ctx) {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store, no-transform',
+      'connection': 'keep-alive',
+      'x-accel-buffering': 'no',
+    })
+
+    let closed = false
+    let keepalive: ReturnType<typeof setInterval> | undefined
+    let detach: (() => void) | undefined
+
+    const finish = (): void => {
+      if (closed)
+        return
+      closed = true
+      if (keepalive !== undefined) {
+        clearInterval(keepalive)
+        keepalive = undefined
+      }
+      detach?.()
+      detach = undefined
+    }
+
+    const sink = {
+      push(frame: string): void {
+        if (!closed)
+          res.write(`data: ${frame}\n\n`)
+      },
+      close(): void {
+        finish()
+        res.end()
+      },
+    }
+
+    res.write('retry: 1000\n\n')
+    detach = attachSettings(sink)
+    // 首帧就是当前权威状态：接上即有值，不需要额外一次 GET。
+    sink.push(JSON.stringify({ action: 'settings', payload: runtimeStatus(ctx) }))
+
+    keepalive = setInterval(() => {
+      if (!closed)
+        res.write(': keepalive\n\n')
+    }, SSE_KEEPALIVE_MS)
+    keepalive.unref?.()
+
+    req.on('close', finish)
+    res.on('close', finish)
+    res.on('error', finish)
+  },
+}
+
 export const routes: readonly Route[] = [
   settingsRoute,
+  settingsStreamRoute,
   catalogRoute,
   patchRoute,
   assetRoute,

@@ -14,12 +14,21 @@
  * 之间换算（它还带 DPI 线性化）；这里 `devicePixelRatio` 就是唯一换算点。
  */
 
-import type { DshPetConfig, MotionInput, PetRef } from 'dsh-pet-component'
-import type { PetAsset, PetRuntimeStatus, PetSessionPayload, PetWorkStatus } from '../shared/types'
+import type { DshPetConfig, PetRef } from 'dsh-pet-component'
+import type { PetAsset, PetRuntimeStatus, PetSessionFrame, PetSettingsFrame } from '../shared/types'
 import type { DragSample, PhysicsParams, ThrowBounds, ThrowState } from './physics'
 import { Pet, useControllablePet } from 'dsh-pet-component'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
+import {
+  PET_ASPECT,
+  PET_BASE_WIDTH,
+  PET_BUBBLE_HEADROOM,
+  PET_BUBBLE_MIN_WIDTH,
+  PET_SIZE_MAX,
+  PET_SIZE_MIN,
+} from '../shared/constants'
+import { createBubbleTracker } from './bubble'
 import {
   DEFAULT_PHYSICS,
   DRAG_THRESHOLD,
@@ -34,19 +43,20 @@ import {
 const params = new URLSearchParams(window.location.search)
 const ORIGIN = params.get('origin') ?? ''
 
-/** 宠物基准渲染宽度（px，100% 档位）。 */
-const PET_BASE_WIDTH = 200
-/** 宠物包围盒宽高比（dsh-pet 画布 640×360）。 */
-const PET_ASPECT = 9 / 16
-
 /** 主进程下发的初始几何（全部是屏幕坐标 / DIP）。 */
 function num(key: string, fallback: number): number {
   const value = Number(params.get(key))
   return Number.isFinite(value) ? value : fallback
 }
 
-/** 窗口四周留白（主进程下发，与 main.cjs 的 WINDOW_MARGIN 同源）。 */
+/**
+ * 窗口四周留白（主进程下发，与 `shared/constants.ts` 的 `PET_WINDOW_MARGIN` 同源）。
+ *
+ * 左右与下方是「宠物贴边时仍能抓到」的余量；上方另加 `BUBBLE_HEADROOM`（气泡画布）。
+ */
 const WINDOW_MARGIN = num('margin', 48)
+/** 气泡画布高度（窗口上方额外留白，主进程下发）。 */
+const BUBBLE_HEADROOM = num('headroom', PET_BUBBLE_HEADROOM)
 /** 窗口内容区左上角（屏幕坐标）。 */
 const WIN_X = num('winX', 0)
 const WIN_Y = num('winY', 0)
@@ -65,7 +75,6 @@ interface PetBridge {
   /** 拖拽/飞行开关：让主进程期间保持可交互。 */
   setDragging: (dragging: boolean) => void
   setInteractive: (interactive: boolean) => void
-  setSize: (sizePercent: number) => void
   /** 弹出右键菜单（显示主界面 / 关闭宠物）。 */
   showMenu: (payload: { openUrl?: string, showLabel?: string, closeLabel?: string }) => void
   /** 订阅菜单点击。返回取消订阅函数。 */
@@ -78,19 +87,44 @@ declare global {
   }
 }
 
-const STATUS_MOTION: Record<PetWorkStatus, MotionInput> = {
-  thinking: { type: 'thinking', loop: true },
-  working: { type: 'working', loop: true },
-  result: { type: 'result', loop: true },
-  waiting: { type: 'waiting', loop: true },
-  success: 'success',
-  error: 'failed',
+/**
+ * 气泡画布高度：随宠物宽度等比缩放（气泡本身按 `--dsh-pet-size` 缩放）。
+ *
+ * 200px 基准下是 120px —— 放得下 3 条堆叠气泡（组件 `maxVisible` 默认 3）。
+ */
+function bubbleHeadroomFor(petWidth: number): number {
+  return Math.round(BUBBLE_HEADROOM * (petWidth / PET_BASE_WIDTH))
+}
+
+/**
+ * 窗口尺寸（宠物 + 留白 + 上方气泡画布，宽度另有下限）。
+ *
+ * 与上游 `usePetWindowSize()` 同义：
+ * - **宽度取 `max(宠物宽 + padX, BUBBLE_MIN_WIDTH)`** —— 宠物缩小时窗口不跟着缩到气泡
+ *   放不下，否则气泡被压成两行甚至裁掉；
+ * - 高度 = 宠物高 + 上下留白 + 气泡画布。
+ *
+ * **渲染端是窗口几何的唯一真值**：宠物素材自带 `size`（预设多为 220），主进程只知道
+ * 200 的基准宽，让它自己按百分比算窗口就会算窄、把宠物裁掉。因此主进程只做「应用给定
+ * 矩形」，尺寸一律由这里经 `setBounds` 下发（这也是「改了大小窗口不变」的修法之一）。
+ */
+function windowSizeFor(petWidth: number, petHeight: number): { width: number, height: number } {
+  return {
+    width: Math.max(petWidth + WINDOW_MARGIN * 2, PET_BUBBLE_MIN_WIDTH),
+    height: petHeight + WINDOW_MARGIN * 2 + bubbleHeadroomFor(petWidth),
+  }
+}
+/**
+ * 宠物在窗口内的水平偏移：窗口比宠物宽时居中（气泡层按 `left: 50%` 定位在宠物身上）。
+ */
+function petOffsetXFor(petWidth: number): number {
+  return Math.round((windowSizeFor(petWidth, 0).width - petWidth) / 2)
 }
 
 function normalizeSize(value: number | null | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value))
     return 100
-  return Math.min(200, Math.max(50, value))
+  return Math.min(PET_SIZE_MAX, Math.max(PET_SIZE_MIN, value))
 }
 
 function messageOf(error: unknown): string {
@@ -171,13 +205,26 @@ function App(): React.ReactElement | null {
 
   const [status, setStatus] = useState<PetRuntimeStatus | null>(null)
   const [asset, setAsset] = useState<PetAsset | null>(null)
-  const [motion, setMotion] = useState<MotionInput>('idle')
   const [dragging, setDragging] = useState(false)
+  /**
+   * 会话 → 气泡的桥接状态机（逐条复刻上游 `use-bubble-tracker`）。
+   *
+   * 用 ref 持有实例：它内部保存「上一次档位 / 终态是否已播」这些跨帧状态，
+   * 每次渲染重建会让终态动画反复重播。
+   */
+  const trackerRef = useRef<ReturnType<typeof createBubbleTracker> | null>(null)
 
   const physics = useMemo<PhysicsParams>(() => ({ ...DEFAULT_PHYSICS }), [])
 
   // --- 状态与素材 ------------------------------------------------------
-
+  //
+  // 状态有**两条**来源，缺一不可：
+  //   1. 挂载时 `GET /settings` 一次 —— 首屏值，SSE 还没连上时也不至于空白
+  //      （也是 `scripts/verify-drag.mjs` 的假宿主唯一实现的端点）；
+  //   2. 之后全程由 `/settings/stream` 推送 —— 设置页改大小 / 抛射 / 选择后**立刻**生效。
+  //
+  // 早期只有第 1 条：滑条拖完窗口不知道（大小不变）、抛射关了窗口不知道（还在飞）、
+  // 换宠物要等重启。第 2 条就是这三个症状的共同根因。
   useEffect(() => {
     let cancelled = false
     void fetchStatus()
@@ -191,6 +238,25 @@ function App(): React.ReactElement | null {
     return () => {
       cancelled = true
     }
+  }, [])
+
+  useEffect(() => {
+    if (!ORIGIN)
+      return
+    const source = new EventSource(`${ORIGIN}/dsh-pet-lite/settings/stream`)
+    source.onmessage = (event) => {
+      try {
+        const frame = JSON.parse(event.data) as PetSettingsFrame
+        if (frame?.payload) {
+          setStatus(frame.payload)
+          clearError()
+        }
+      }
+      catch {
+        /* 非法帧：保留上一次的权威值 */
+      }
+    }
+    return () => source.close()
   }, [])
 
   const activeId = status?.active_pet ?? ''
@@ -214,53 +280,113 @@ function App(): React.ReactElement | null {
   }, [activeId])
 
   const sizePercent = normalizeSize(status?.pet_size)
+  /** 抛射开关（默认关闭）：关着时松手即定住，不做重力积分与撞边反弹。 */
+  const throwEnabled = Boolean(status?.throw_enabled)
 
-  // --- 会话活动 → 动作 --------------------------------------------------
-
+  // --- 会话活动 → 气泡 --------------------------------------------------
+  //
+  // 【为什么走气泡而不是 `pet.motion(...)`】气泡就是动作的**载体**：组件把所有常驻气泡的
+  // `motion` 按 `BUBBLE_MOTION_PRIORITY` 聚合成 `motion` prop。于是：
+  //   - 状态在，动画就在（thinking / working / waiting 循环）；
+  //   - 气泡关掉，动画自动回落 `idle` —— 会话中止时「不再循环思考」不需要额外逻辑；
+  //   - success / error 这些**限时**气泡由组件用命令面播一次，播完自己收，不会把动画掐断。
+  //
+  // 早期版本只做 `setMotion(STATUS_MOTION[workStatus])`、从不调 `pet.bubble`：
+  // 既没有气泡（用户看到的「一个气泡都没有」），中止时 workStatus 变回 undefined
+  // 又让那个 `if` 直接跳过，动画就永远停在上一个思考/工作档（「停止后还在播」）。
   useEffect(() => {
     if (!ORIGIN)
       return
+
+    // 桥接状态机在 `renderer/bubble.ts`：它自己管「每个会话一条气泡、终态只播一次、
+    // 档位没了就收」这些跨帧状态，这里只管把 SSE 帧喂给它。
+    //
+    // `onIdle` 是「命令层动作」的归还点：终态档（success / failed）由组件用命令面播一次，
+    // 归还依赖动画播完；静态图 / 素材缺失 / 减少动态效果时那个回调永远不来，动画会钉死。
+    const tracker = createBubbleTracker(pet.bubble, { onIdle: () => pet.clear() })
+    trackerRef.current = tracker
+
     const source = new EventSource(`${ORIGIN}/dsh-pet-lite/session/stream`)
+
     source.onmessage = (event) => {
+      let frame: PetSessionFrame
       try {
-        const root = JSON.parse(event.data) as { payload?: PetSessionPayload }
-        const workStatus = root.payload?.workStatus
-        if (workStatus && workStatus in STATUS_MOTION)
-          setMotion(STATUS_MOTION[workStatus])
+        frame = JSON.parse(event.data) as PetSessionFrame
       }
       catch {
-        /* 非法帧：忽略，不打断播放 */
+        return
       }
+      if (frame?.payload) {
+        tracker.apply(frame.payload, frame.action)
+        return
+      }
+      // remove 帧的载荷只有 id：补成最少字段再交给状态机。
+      const id = (frame as { payload?: { id?: string } })?.payload?.id
+      if (typeof id === 'string' && id)
+        tracker.apply({ id }, 'remove')
     }
-    return () => source.close()
-  }, [])
+
+    // 重连 = 宿主那边的累计态可能已经被丢弃（`state-lost`）：旧气泡一律作废。
+    // SSE 注释帧拿不到，用连接打开这个等价信号。
+    source.onopen = () => {
+      tracker.clear()
+    }
+
+    return () => {
+      source.close()
+      tracker.dispose()
+      trackerRef.current = null
+    }
+  }, [pet])
 
   const width = (asset?.kind === 'dsh' ? (asset.size ?? PET_BASE_WIDTH) : PET_BASE_WIDTH) * sizePercent / 100
   const height = width * PET_ASPECT
-
-  useEffect(() => {
-    window.petBridge?.setSize(sizePercent)
-  }, [sizePercent])
+  /** 宠物在窗口内的垂直偏移：上方先让出气泡画布（DOM 与窗口几何必须同源）。 */
+  const petOffsetY = WINDOW_MARGIN + bubbleHeadroomFor(width)
+  /** 宠物在窗口内的水平偏移：窗口可能比宠物宽（气泡最小宽度），此时宠物居中。 */
+  const petOffsetX = petOffsetXFor(width)
 
   // --- 拖动 / 抛掷 ------------------------------------------------------
   //
   // 位置全部收敛在 `viewRef`（屏幕坐标）：任何位移最后都经 `applyPosition` 落到窗口上。
   //
-  // 初值来自主进程下发的真实窗口位置：宠物包围盒左上角 = 窗口内容区左上角 + 留白。
+  // 初值来自主进程下发的真实窗口位置：宠物包围盒左上角 = 窗口内容区左上角 + 垂直偏移。
   // 早期版本把「窗口内偏移（48）」当成屏幕坐标用，于是窗口被算到 `48-48=0` ——
   // 一拖动就跳到屏幕左上角，并且只能在那一片里挪。这就是那个 bug 的根。
   const viewRef = useRef<View>({
-    x: WIN_X + WINDOW_MARGIN,
-    y: WIN_Y + WINDOW_MARGIN,
+    x: WIN_X + petOffsetXFor(PET_BASE_WIDTH),
+    y: WIN_Y + WINDOW_MARGIN + bubbleHeadroomFor(PET_BASE_WIDTH),
     width: PET_BASE_WIDTH,
     height: PET_BASE_WIDTH * PET_ASPECT,
   })
+
+  /** 宠物在窗口内的偏移（`applyPosition` 读它，必须与 DOM 偏移同源）。 */
+  const offsetRef = useRef({ x: petOffsetX, y: petOffsetY })
+  offsetRef.current = { x: petOffsetX, y: petOffsetY }
 
   // 尺寸变化必须同步进几何：抛掷边界与弹簧目标都按它算，不更新会用到旧包围盒。
   useEffect(() => {
     viewRef.current.width = width
     viewRef.current.height = height
   }, [width, height])
+
+  /**
+   * 尺寸变化 → 立刻把窗口改成新大小。
+   *
+   * 这是「拖动大小滑条宠物不变」的修法：窗口尺寸**只由这里决定**（主进程不做百分比换算，
+   * 它不知道宠物素材自带的 `size`）。窗口位置也要跟着调 —— 气泡画布在宠物上方，
+   * 尺寸一变宠物包围盒的 y 就不该再贴着旧的离线位置。
+   */
+  useEffect(() => {
+    const size = windowSizeFor(width, height)
+    window.petBridge?.setBounds(
+      viewRef.current.x - offsetRef.current.x,
+      viewRef.current.y - offsetRef.current.y,
+      size.width,
+      size.height,
+    )
+  }, [width, height, petOffsetX, petOffsetY])
+
   const dragStateRef = useRef<DragState>({ active: false, dragging: false, sx: 0, sy: 0, petX: 0, petY: 0 })
   const dragTargetRef = useRef<DragTarget | null>(null)
   const dragVelRef = useRef({ vx: 0, vy: 0 })
@@ -276,19 +402,20 @@ function App(): React.ReactElement | null {
     const clamp = throwBoundsIn(AREA, view.width, 24)
     view.x = Math.round(Math.min(clamp.maxX, Math.max(clamp.minX, x)))
     view.y = Math.round(Math.min(clamp.maxY, Math.max(clamp.minY, y)))
-    // 窗口 = 宠物包围盒 + 四周留白。
+    // 窗口 = 宠物包围盒 + 留白（上方另加气泡画布）。
     //
     // **不要乘 devicePixelRatio**：Electron 的 `setContentBounds` 收的就是 DIP（与 CSS px
     // 同一刻度），再乘一次会让窗口以 1.5×/2× 的速度偏离指针。
-    const winX = view.x - WINDOW_MARGIN
-    const winY = view.y - WINDOW_MARGIN
+    const winX = view.x - offsetRef.current.x
+    const winY = view.y - offsetRef.current.y
     if (dragStateRef.current.active || throwRef.current !== null) {
       // 拖拽 / 飞行：走 moveTo。这条路径在指针位于窗口外时仍然有效，
       // 是「能把宠物拖过整个屏幕」的关键；setBounds 只在稳态（尺寸变化、初始落位）用。
       window.petBridge?.moveTo(winX, winY)
       return
     }
-    window.petBridge?.setBounds(winX, winY, view.width + WINDOW_MARGIN * 2, view.height + WINDOW_MARGIN * 2)
+    const size = windowSizeFor(view.width, view.height)
+    window.petBridge?.setBounds(winX, winY, size.width, size.height)
   }, [])
 
   /** 停止弹簧跟随（位置定格在当前位置）。 */
@@ -420,7 +547,11 @@ function App(): React.ReactElement | null {
     }
 
     const view = viewRef.current
-    const velocity = estimateReleaseVelocity(dragTrailRef.current, performance.now(), physics)
+    // 【抛射开关】`throw_enabled` 默认关闭。关闭时**不做重力积分、不甩出**：松手就定住，
+    // 宠物只是被挪到新位置。早期版本无条件按轨迹估速甩出，于是「明明关了抛射还是会飞」。
+    const velocity = throwEnabled
+      ? estimateReleaseVelocity(dragTrailRef.current, performance.now(), physics)
+      : null
     dragTrailRef.current = []
     if (velocity) {
       // 飞行期间仍然需要 moveTo 路径，因此 dragging 状态保持到落地。
@@ -428,7 +559,7 @@ function App(): React.ReactElement | null {
       return
     }
     window.petBridge?.setDragging(false)
-  }, [physics, startDragFollow, stopDragFollow, startThrow])
+  }, [physics, startThrow, stopDragFollow, throwEnabled])
 
   // 命中判定 → 整窗点击穿透翻转。
   useEffect(() => {
@@ -514,8 +645,10 @@ function App(): React.ReactElement | null {
     <div
       style={{
         position: 'absolute',
-        left: WINDOW_MARGIN,
-        top: WINDOW_MARGIN,
+        // 窗口可能比宠物宽（气泡最小宽度）：宠物在这块画布里居中。
+        left: petOffsetX,
+        // 上方先让出气泡画布：气泡挂在宠物头顶，窗口顶边必须比宠物更高。
+        top: petOffsetY,
         pointerEvents: 'none',
         cursor: dragging ? 'grabbing' : 'grab',
       }}
@@ -527,7 +660,9 @@ function App(): React.ReactElement | null {
         uri={uri}
         ext={ext}
         size={width}
-        motion={motion}
+        // `motion` 只作**回落值**：会话档位全部由气泡聚合驱动（见上方 SSE effect），
+        // 这里保持 idle，气泡一收动画就自然停下。
+        motion="idle"
         dragging={dragging}
         cache={false}
         hitboxRef={hitboxRef}
@@ -547,17 +682,16 @@ function App(): React.ReactElement | null {
  * 初始化：把窗口对齐到主进程下发的真实位置。
  *
  * 主进程用 `winX/winY/area*` 告诉我们窗口在哪、工作区多大，因此这里**不需要猜**：
- * 宠物包围盒左上角 = 窗口内容区左上角 + 留白，随后按该几何把窗口吸附一次
+ * 宠物包围盒左上角 = 窗口内容区左上角 + 垂直偏移，随后按该几何把窗口吸附一次
  * （主进程可能把它落在工作区边缘，吸附会把它夹回可视区）。
+ *
+ * 【不要再`setSize(100)`】早先这里硬编码 100%，把已经持久化的 `pet_size` 顶掉了 ——
+ * 用户拖了滑条、重开窗口又变回 100%。尺寸**只由 App 里那条 effect**下发（它读的是宿主
+ * 权威状态），这里只负责把窗口位置对齐到主进程给的坐标。
  */
 function seedWindow(): void {
-  window.petBridge?.setSize(100)
-  window.petBridge?.setBounds(
-    WIN_X,
-    WIN_Y,
-    PET_BASE_WIDTH + WINDOW_MARGIN * 2,
-    PET_BASE_WIDTH * PET_ASPECT + WINDOW_MARGIN * 2,
-  )
+  const size = windowSizeFor(PET_BASE_WIDTH, PET_BASE_WIDTH * PET_ASPECT)
+  window.petBridge?.setBounds(WIN_X, WIN_Y, size.width, size.height)
 }
 
 const container = document.getElementById('root')

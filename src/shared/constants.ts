@@ -52,3 +52,41 @@ export const PET_DEFAULT_SIZE = 100
 export const PET_SIZE_MIN = 50
 export const PET_SIZE_MAX = 200
 export const PET_SIZE_STEP = 5
+
+/**
+ * 设置变更推送流：设置页改选择 / 大小 / 抛射后，宿主在这里把**权威状态**推给已开的桌宠窗口。
+ *
+ * 【为什么必须有】窗口只在挂载时 `GET /settings` 一次。没有这条流，设置页改完大小、换个
+ * 宠物、关掉抛射，已经开着的窗口一无所知 —— 表现就是「滑条拖了宠物不变」。
+ *
+ * 单独一条流而不是塞进 `/session/stream`：后者是**会话增量**（reducer 逐字复刻上游），
+ * 混进设置帧会让那份契约漂移。
+ */
+export const SETTINGS_STREAM_PATH = '/settings/stream'
+
+// --- 窗口几何（主进程与渲染端必须用同一组数字） -------------------------
+//
+// 作用域：像素 / DIP。`runtime/electron-helper/main.cjs` 是纯 CJS、不经构建，
+// 因此那边重复写一遍同值常量（带注释指回本文件），改动时必须同步。
+
+/** 宠物基准渲染宽度（px，100% 档位）。 */
+export const PET_BASE_WIDTH = 200
+/**
+ * 窗口最小宽度（px）：保证气泡读得清。
+ *
+ * 与上游 `apps/desktop/src/pet/constants.ts` 的 `PET_BUBBLE_MIN_WIDTH` 同义 —— 宠物缩到
+ * 50% 时若窗口也跟着收到 200px 宽，气泡会被压成两行甚至被裁，索性给窗口一个下限。
+ */
+export const PET_BUBBLE_MIN_WIDTH = 420
+/** 宠物包围盒宽高比（dsh-pet 画布 640×360）。 */
+export const PET_ASPECT = 9 / 16
+/** 窗口左右与下方留白（px，100% 档位）。 */
+export const PET_WINDOW_MARGIN = 48
+/**
+ * 窗口上方留白（px，100% 档位）：**气泡画布**。
+ *
+ * 气泡层挂在宠物头顶（`.dsh-pet__bubbles--top` 的 `bottom: calc(100% - size*0.108)`），
+ * 最多堆 3 条。窗口只有 48px 上边距时，气泡会被窗口裁掉 —— 这就是「气泡不出现」的
+ * 第二个原因（第一个是从没调用过 `pet.bubble`）。120px 恰好够 200% 档位下的三条。
+ */
+export const PET_BUBBLE_HEADROOM = 120

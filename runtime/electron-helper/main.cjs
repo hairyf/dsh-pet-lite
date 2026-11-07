@@ -32,9 +32,17 @@ app.setName('dsh-pet-lite-helper')
 if (process.platform === 'win32')
   app.disableHardwareAcceleration()
 
-/** 宠物渲染宽度（px，100% 档位）与窗口四周留白。 */
+/**
+ * 窗口几何 —— 与 `src/shared/constants.ts` 的 `PET_BASE_WIDTH` / `PET_ASPECT` /
+ * `PET_WINDOW_MARGIN` / `PET_BUBBLE_HEADROOM` **同值**。
+ *
+ * 这个文件是纯 CJS、不经构建（见 AGENTS「runtime/electron-helper 不进 lint/tsc 的源码树」），
+ * 因此只能重复写一遍常量 —— 改动时必须两边一起改。下面的 `pet:set-bounds` 才是尺寸的
+ * 真值来源，这组常量只用于**首次建窗**的初始猜测（窗口一加载渲染端就立刻纠正它）。
+ */
 const PET_BASE_WIDTH = 200
 const WINDOW_MARGIN = 48
+const BUBBLE_HEADROOM = 120
 
 /** 宿主 origin 与配置地址（由插件 host 半侧注入）。 */
 const ORIGIN = process.env.DSH_PET_LITE_ORIGIN || ''
@@ -58,13 +66,14 @@ function setWindowIgnore(target, value) {
   target.setIgnoreMouseEvents(value, { forward: true })
 }
 
-/** 窗口尺寸：宠物本体 + 四周留白（按 size 百分比缩放）。 */
+/** 窗口尺寸：宠物本体 + 四周留白 + 上方气泡画布（按 size 百分比缩放）。 */
 function windowSize(sizePercent) {
   const width = Math.round((PET_BASE_WIDTH * sizePercent) / 100)
   const height = Math.round((width * 9) / 16)
   return {
     width: width + WINDOW_MARGIN * 2,
-    height: height + WINDOW_MARGIN * 2,
+    // 气泡画布随宠物宽度等比缩放（渲染端用同一公式，见 src/renderer/index.tsx）。
+    height: height + WINDOW_MARGIN * 2 + Math.round((BUBBLE_HEADROOM * width) / PET_BASE_WIDTH),
   }
 }
 
@@ -148,6 +157,8 @@ function loaded(target) {
     areaWidth: String(workArea.width),
     areaHeight: String(workArea.height),
     margin: String(WINDOW_MARGIN),
+    // 上方气泡画布（窗口顶部留白）：渲染端的窗口几何必须与这里同源。
+    headroom: String(BUBBLE_HEADROOM),
   })
   target.loadFile(path.join(__dirname, 'renderer', 'index.html'), {
     query: Object.fromEntries(query),
@@ -308,25 +319,15 @@ ipcMain.on('pet:move-to', (event, position) => {
     process.stdout.write(`[bounds] ${key}\n`)
 })
 
-/** 渲染端请求调整窗口大小（设置页改变 size 时）。 */
-ipcMain.on('pet:set-size', (event, sizePercent) => {
-  const target = BrowserWindow.fromWebContents(event.sender)
-  if (!target || target.isDestroyed())
-    return
-  const value = Number(sizePercent)
-  if (!Number.isFinite(value))
-    return
-  const { width, height } = windowSize(value)
-  const current = target.getContentBounds()
-  lastRequested.delete(target.id)
-  target.setContentSize(width, height, false)
-  // 尺寸变化后把窗口重新贴回右下角可视区，避免撑出屏幕。
-  const display = screen.getDisplayNearestPoint({ x: current.x, y: current.y })
-  const workArea = display.workArea
-  const x = Math.min(current.x, workArea.x + workArea.width - width)
-  const y = Math.min(current.y, workArea.y + workArea.height - height)
-  target.setPosition(Math.max(workArea.x, x), Math.max(workArea.y, y), false)
-})
+// --- 尺寸变更 -----------------------------------------------------------
+//
+// 【没有 `pet:set-size` 了】早先渲染端会发一条「按百分比改窗口大小」，主进程用
+// 自己的 `PET_BASE_WIDTH` 换算 —— 但宠物素材自带 `size`（预设多为 220），主进程不知道，
+// 于是它算出来的窗口总是偏窄，宠物被裁；再加上渲染端启动时硬编码 `setSize(100)`，
+// 用户拖完滑条、重开窗口又变回 100%。
+//
+// 现在只有一条路径：渲染端算出**完整矩形**（宠物 + 留白 + 气泡画布）走 `pet:set-bounds`，
+// 主进程只负责落窗。窗口尺寸因此永远与 `<Pet size>` 一致。
 
 /** 渲染端请求在系统浏览器打开外链（社区页等）。 */
 ipcMain.on('pet:open-external', (_event, url) => {

@@ -334,6 +334,16 @@ const SETTINGS_PATH = "/settings";
 const CATALOG_PATH = "/catalog";
 /** SSE 心跳注释帧间隔（毫秒）。 */
 const SSE_KEEPALIVE_MS = 15e3;
+/**
+* 设置变更推送流：设置页改选择 / 大小 / 抛射后，宿主在这里把**权威状态**推给已开的桌宠窗口。
+*
+* 【为什么必须有】窗口只在挂载时 `GET /settings` 一次。没有这条流，设置页改完大小、换个
+* 宠物、关掉抛射，已经开着的窗口一无所知 —— 表现就是「滑条拖了宠物不变」。
+*
+* 单独一条流而不是塞进 `/session/stream`：后者是**会话增量**（reducer 逐字复刻上游），
+* 混进设置帧会让那份契约漂移。
+*/
+const SETTINGS_STREAM_PATH = "/settings/stream";
 //#endregion
 //#region src/host/store.ts
 /** `$DSH_HOME`（默认 `~/.dsh`），与 DSH 其余工具链一致。 */
@@ -1199,7 +1209,7 @@ async function withTimeout(task, ms, message) {
 //#endregion
 //#region src/host/runtime.ts
 /** 已接入的 SSE 消费者（断连即移除）。 */
-const sinks = /* @__PURE__ */ new Set();
+const sinks$1 = /* @__PURE__ */ new Set();
 /** 会话出生标记：首次出现的 id 推 create，此后只推增量 update。 */
 const knownSessions = /* @__PURE__ */ new Set();
 /** 会话总线监听注销句柄；undefined = 当前无消费者、未挂载。 */
@@ -1750,13 +1760,13 @@ const sessionStream = {
 *   随旧连接丢弃，调用方应据此告知消费者作废旧气泡。
 */
 start(sink) {
-	const stateLost = sinks.size === 0;
-	sinks.add(sink);
+	const stateLost = sinks$1.size === 0;
+	sinks$1.add(sink);
 	attachSessionBus();
 	return {
 		detach: () => {
-			sinks.delete(sink);
-			if (sinks.size > 0) return;
+			sinks$1.delete(sink);
+			if (sinks$1.size > 0) return;
 			closeSessionBus();
 			reducer.clear();
 		},
@@ -1769,7 +1779,7 @@ function publish(action, payload) {
 		action,
 		payload
 	});
-	for (const sink of sinks) sink.push(frame);
+	for (const sink of sinks$1) sink.push(frame);
 }
 /** 首个消费者接入：解析宿主服务面并挂载会话事件监听（幂等）。 */
 function attachSessionBus() {
@@ -1927,6 +1937,46 @@ function handleAssistantStream(payload) {
 	reducer.chunk({ id }, chunk);
 }
 //#endregion
+//#region src/host/settings-stream.ts
+/**
+* host/settings-stream.ts — 设置变更推送流（给**已打开**的桌宠窗口）。
+*
+* 【为什么必须有】桌宠窗口只在挂载时 `GET /settings` 一次，而设置页的写入路径
+* （`PUT /settings`）只改持久层。没有推送通道时：
+*
+* - 拖动大小滑条 → 持久层变了、窗口的 `<Pet size>` 却还是旧值（用户报告「拖了也不变」）；
+* - 关掉抛射 → 窗口仍按 `throw_enabled=true` 处理（用户报告「明明关了还是会飞」）；
+* - 换宠物 / 启用关闭 → 窗口要等下次重启才跟上。
+*
+* 这条流与 `/session/stream` **刻意分开**：后者是会话增量投影（reducer 逐字复刻上游），
+* 把设置帧混进去会让那份契约漂移。两条流的帧形状也各自独立（`PetSessionFrame` /
+* `PetSettingsFrame`）。
+*
+* 消费模型与 session-stream 一致：**没有消费者就没有状态**，断开即移除。
+*/
+/** 已接入的设置消费者（断连即移除）。 */
+const sinks = /* @__PURE__ */ new Set();
+/** 接入一个设置消费者；返回 detach（幂等）。 */
+function attachSettings(sink) {
+	sinks.add(sink);
+	return () => {
+		sinks.delete(sink);
+	};
+}
+/**
+* 把最新设置推给所有已打开的窗口。
+*
+* 写失败不在这里处理：断连由各自的 `close` 回调清理（与 session-stream 的 publish 同义）。
+*/
+function publishSettings(status) {
+	if (sinks.size === 0) return;
+	const body = JSON.stringify({
+		action: "settings",
+		payload: status
+	});
+	for (const sink of sinks) sink.push(body);
+}
+//#endregion
 //#region src/host/routes.ts
 const JSON_HEADERS = {
 	"content-type": "application/json; charset=utf-8",
@@ -2031,13 +2081,16 @@ const patchRoute = {
 			pet_size: patch.pet_size,
 			throw_enabled: patch.throw_enabled
 		});
+		let status;
 		try {
 			await syncDesktop(ctx, next.enabled && next.active_pet !== "");
+			status = runtimeStatus(ctx);
 		} catch (error) {
 			sendText(res, 502, `PET_DESKTOP_START_FAILED: ${error instanceof Error ? error.message : String(error)}`);
 			return;
 		}
-		sendJson(res, 200, runtimeStatus(ctx));
+		publishSettings(status);
+		sendJson(res, 200, status);
 	}
 };
 /** 把桌面窗口对齐到「该不该在」。 */
@@ -2048,6 +2101,53 @@ async function syncDesktop(ctx, shouldOpen) {
 }
 const routes = [
 	settingsRoute,
+	{
+		method: "GET",
+		path: `${ROUTE_PREFIX}${SETTINGS_STREAM_PATH}`,
+		handle(req, res, _url, ctx) {
+			res.writeHead(200, {
+				"content-type": "text/event-stream; charset=utf-8",
+				"cache-control": "no-store, no-transform",
+				"connection": "keep-alive",
+				"x-accel-buffering": "no"
+			});
+			let closed = false;
+			let keepalive;
+			let detach;
+			const finish = () => {
+				if (closed) return;
+				closed = true;
+				if (keepalive !== void 0) {
+					clearInterval(keepalive);
+					keepalive = void 0;
+				}
+				detach?.();
+				detach = void 0;
+			};
+			const sink = {
+				push(frame) {
+					if (!closed) res.write(`data: ${frame}\n\n`);
+				},
+				close() {
+					finish();
+					res.end();
+				}
+			};
+			res.write("retry: 1000\n\n");
+			detach = attachSettings(sink);
+			sink.push(JSON.stringify({
+				action: "settings",
+				payload: runtimeStatus(ctx)
+			}));
+			keepalive = setInterval(() => {
+				if (!closed) res.write(": keepalive\n\n");
+			}, SSE_KEEPALIVE_MS);
+			keepalive.unref?.();
+			req.on("close", finish);
+			res.on("close", finish);
+			res.on("error", finish);
+		}
+	},
 	catalogRoute,
 	patchRoute,
 	{

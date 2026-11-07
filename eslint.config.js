@@ -12,6 +12,7 @@ export default antfu({
   type: 'lib',
   pnpm: true,
   ignores: [
+    'README.md',
     'source/**',
     'dist/**',
     // 临时的截图 / 诊断脚本（.tmp-* 均为本地工作目录，不入库）

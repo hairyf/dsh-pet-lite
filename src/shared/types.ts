@@ -138,6 +138,18 @@ export type PetWorkStatus = 'thinking' | 'working' | 'result' | 'waiting' | 'suc
 /** 工具活动分类：气泡按分类选文案。 */
 export type PetToolActivity = 'searching' | 'editing' | 'testing' | 'commanding' | 'using-tool'
 
+/** 会话 SSE 帧：`create` 出生 / `update` 增量 / `remove` 消失。 */
+export interface PetSessionFrame {
+  action: 'create' | 'update' | 'remove'
+  payload: PetSessionPayload
+}
+
+/** 设置 SSE 帧：宿主推给桌宠窗口的**权威**状态（窗口据此调整大小 / 抛射 / 选择）。 */
+export interface PetSettingsFrame {
+  action: 'settings'
+  payload: PetRuntimeStatus
+}
+
 /** 单个 SSE 消费者：只暴露「推一帧」与「结束连接」。 */
 export interface SessionStreamSink {
   push: (frame: string) => void

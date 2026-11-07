@@ -83,9 +83,15 @@ function startFakeHost() {
 
 const fakeHost = await startFakeHost()
 
+// 【必须摘掉 ELECTRON_RUN_AS_NODE】dsh-tauri 桌面端用它让同一个二进制跑 Node 内核，
+// 继承到桌宠窗口就会以 Node 模式执行 main.cjs（`require('electron')` 返回路径、`app` 为
+// undefined）—— 进程立刻退出，CDP 端口连不上。宿主侧 `helperChildEnv()` 做同一件事。
+const env = { ...process.env }
+delete env.ELECTRON_RUN_AS_NODE
+
 const child = spawn(electronPath, [helper, `--remote-debugging-port=${DEBUG_PORT}`], {
   env: {
-    ...process.env,
+    ...env,
     DSH_PET_LITE_ORIGIN: `http://127.0.0.1:${FAKE_HOST_PORT}`,
     DSH_PET_LITE_CONFIG_URL: `http://127.0.0.1:${FAKE_HOST_PORT}/dsh-pet-lite/catalog`,
     DSH_PET_LITE_TRACE_BOUNDS: '1',
