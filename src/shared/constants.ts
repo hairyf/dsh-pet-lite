@@ -90,3 +90,10 @@ export const PET_WINDOW_MARGIN = 48
  * 第二个原因（第一个是从没调用过 `pet.bubble`）。120px 恰好够 200% 档位下的三条。
  */
 export const PET_BUBBLE_HEADROOM = 120
+/**
+ * 贴边余量（px）：宠物本体可以挂出工作区边缘这么多，仍抓得回来。
+ *
+ * 拖拽 / 抛掷的边界用它（`physics.throwBoundsIn(AREA, size, PET_EDGE_ALLOW)`），默认落点
+ * 也用它留边距 —— 两处必须同值，否则启动位置和随手一拖的落点会跳一下。
+ */
+export const PET_EDGE_ALLOW = 24

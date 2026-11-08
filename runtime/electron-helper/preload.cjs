@@ -36,6 +36,15 @@ contextBridge.exposeInMainWorld('petBridge', {
   openExternal(url) {
     ipcRenderer.send('pet:open-external', String(url))
   },
+  /**
+   * 把宿主主界面带到前台（双击宠物）。
+   *
+   * 与右键菜单的「显示主界面」同一语义（上游 `pet_show_main_window`）：由主进程按
+   * `open_url` 唤起宿主，而不是在窗口里打开页面 —— 桌宠窗口是不能导航的浮动层。
+   */
+  showMain(openUrl) {
+    ipcRenderer.send('pet:show-main', { openUrl: String(openUrl ?? '') })
+  },
   /** 弹出桌宠右键菜单（显示主界面 / 关闭宠物）。 */
   showMenu(payload) {
     ipcRenderer.send('pet:show-menu', payload ?? {})

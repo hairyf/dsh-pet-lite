@@ -23,7 +23,9 @@ import process from 'node:process'
 
 const DEBUG_PORT = 9226
 const FAKE_HOST_PORT = 39998
-const electronPath = join(process.env.USERPROFILE ?? '', '.dsh', 'electron', 'electron.exe')
+// 同 verify-behavior.mjs：显式注入优先，默认落地目录兜底。
+const electronPath = process.env.DSH_PET_ELECTRON_PATH
+  || join(process.env.USERPROFILE ?? '', '.dsh', 'electron', 'electron.exe')
 const helper = join(process.cwd(), 'runtime', 'electron-helper', 'main.cjs')
 
 if (!existsSync(electronPath)) {

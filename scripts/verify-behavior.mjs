@@ -8,7 +8,9 @@
  *   2. **停止**：会话中止（`workStatus` 回落空闲）后气泡收起、动画回到 `idle`
  *      （早先 `if (workStatus && ...)` 直接跳过，动画永远停在上一个思考/工作档）；
  *   3. **大小**：设置变更后窗口与宠物一起变（早先只在挂载时读一次，滑条等于没接线）；
- *   4. **抛射开关**：`throw_enabled=false` 时松手即定住，不甩出。
+ *   4. **抛射开关**：`throw_enabled=false` 时松手即定住，不甩出；
+ *   5. **落点**：启动时整只宠物落在工作区右下角、任何尺寸档位都不出界
+ *      （早先按窗口贴角，200% 档位右/下身子被屏幕边缘裁掉）。
  *
  * 做法与 verify-drag 一致：拉起 helper（不经 DSH），开远程调试端口用 CDP 派发真实指针
  * 手势 / 读 DOM，宿主侧是一个可编程的极简假宿主（同进程，直接改状态并广播 SSE）。
@@ -25,7 +27,10 @@ import process from 'node:process'
 
 const DEBUG_PORT = 9227
 const HOST_PORT = 39999
-const electronPath = join(process.env.USERPROFILE ?? '', '.dsh', 'electron', 'electron.exe')
+// 与 host 侧的解析顺序一致：显式注入优先（DSH_PET_ELECTRON_PATH），默认落地目录兜底。
+// 默认目录可能被清理（升级 / 手动删过），注入变量是那种机器上唯一能跑起来的入口。
+const electronPath = process.env.DSH_PET_ELECTRON_PATH
+  || join(process.env.USERPROFILE ?? '', '.dsh', 'electron', 'electron.exe')
 const helper = join(process.cwd(), 'runtime', 'electron-helper', 'main.cjs')
 
 if (!existsSync(electronPath)) {
@@ -46,7 +51,8 @@ const status = {
   visible: true,
   desktop_supported: true,
   desktop_open: true,
-  open_url: '',
+  // 双击要唤起的目标：桌面端宿主的 open_url 恒为这个 deep link（见 src/host/routes.ts:100）。
+  open_url: 'dsh://open',
 }
 
 /** 已接入的 SSE 消费者。 */
@@ -132,6 +138,9 @@ const child = spawn(electronPath, [helper, `--remote-debugging-port=${DEBUG_PORT
     DSH_PET_LITE_ORIGIN: `http://127.0.0.1:${HOST_PORT}`,
     DSH_PET_LITE_CONFIG_URL: `http://127.0.0.1:${HOST_PORT}/dsh-pet-lite/catalog`,
     DSH_PET_LITE_TRACE_BOUNDS: '1',
+    // 双击断言只验证「请求到了主进程、目标是宿主的 open_url」：真交给系统会弹「打开方式」
+    // 或把宿主抢到前台，打断后面的手势断言。见 main.cjs 的 showMainWindow。
+    DSH_PET_LITE_SUPPRESS_LAUNCH: '1',
   },
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true,
@@ -149,8 +158,14 @@ function check(ok, message) {
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${message}`)
 }
 
-function boundsTrace() {
-  return stdout.split('\n').filter(line => line.startsWith('[bounds]'))
+/**
+ * 主进程收到的「唤起宿主」请求（双击宠物）。
+ *
+ * 诊断模式下主进程只打印不交棒（见 main.cjs 的 showMainWindow）：真发 `shell.openExternal`
+ * 会让机器上没有该协议处理器的环境弹「打开方式」，也会把真宿主抢到前台干扰后续手势。
+ */
+function showMainTrace() {
+  return stdout.split('\n').filter(line => line.startsWith('[show-main]'))
 }
 
 async function main() {
@@ -212,6 +227,21 @@ async function main() {
       petWidth: rect ? Math.round(rect.width) : 0,
       windowWidth: window.innerWidth,
       windowHeight: window.innerHeight,
+      // 宠物本体的屏幕矩形（DIP）：落点断言靠它，窗口坐标含透明留白、不能直接用。
+      pet: rect
+        ? {
+            x: Math.round(window.screenX + rect.x),
+            y: Math.round(window.screenY + rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          }
+        : null,
+      workArea: {
+        x: window.screen.availLeft,
+        y: window.screen.availTop,
+        width: window.screen.availWidth,
+        height: window.screen.availHeight,
+      },
       // 气泡必须**完整落在窗口内**：窗口只有宠物 + 留白时气泡会被裁掉（用户看到「没有气泡」）。
       bubbleInsideWindow: bubbleRect
         ? bubbleRect.top >= 0 && bubbleRect.bottom <= window.innerHeight
@@ -220,11 +250,46 @@ async function main() {
     }
   })()`)
 
+  /**
+   * 宠物**本体**（不是窗口）整只落在工作区内 —— 用户看到的裁切就是这里越界。
+   *
+   * 用本体矩形而不是窗口矩形：窗口四周有透明留白（左右各 48、上方气泡画布），
+   * 窗口贴边时宠物在哪取决于留白，正是那个「宠物被屏幕裁掉」的来源。
+   */
+  function clipProblem(view) {
+    const pet = view.pet
+    if (!pet)
+      return '读不到宠物矩形'
+    const area = view.workArea
+    const overRight = pet.x + pet.width - (area.x + area.width)
+    const overBottom = pet.y + pet.height - (area.y + area.height)
+    if (pet.x < area.x || pet.y < area.y)
+      return `落在工作区外：宠物 ${pet.x},${pet.y}，工作区 ${area.x},${area.y}`
+    if (overRight > 0 || overBottom > 0)
+      return `溢出工作区：右 ${overRight}px / 下 ${overBottom}px（宠物 ${pet.width}×${pet.height}）`
+    return ''
+  }
+
+  /** 启动落点还必须**贴住**右下角（距边缘约 PET_EDGE_ALLOW=24，留几像素舍入）。 */
+  function cornerProblem(view) {
+    const clipped = clipProblem(view)
+    if (clipped)
+      return clipped
+    const pet = view.pet
+    const area = view.workArea
+    const gapRight = area.x + area.width - (pet.x + pet.width)
+    const gapBottom = area.y + area.height - (pet.y + pet.height)
+    if (gapRight > 40 || gapBottom > 40)
+      return `没有贴住右下角：距右 ${gapRight}px / 下 ${gapBottom}px`
+    return ''
+  }
+
   // --- 0. 首屏：宠物已挂载、无气泡 ---------------------------------------
   const boot = await snapshot()
   check(boot.motion === 'idle', `初始动作是 idle（实际 ${boot.motion}）`)
   check(boot.bubbleCount === 0, `初始没有气泡（实际 ${boot.bubbleCount}）`)
   check(boot.petWidth === 200, `100% 档位下宠物宽 200（实际 ${boot.petWidth}）`)
+  check(cornerProblem(boot) === '', `启动时宠物整只贴在右下角（${cornerProblem(boot) || 'ok'}）`)
 
   // --- 1. 进行中：气泡必须出现 -------------------------------------------
   pushSession('update', { workStatus: 'thinking', displayTitle: '会话标题', liveActivity: { kind: 'reasoning', text: '正在分析代码' } })
@@ -305,6 +370,8 @@ async function main() {
   check(resized.petWidth === 300, `150% 档位下宠物宽 300（实际 ${resized.petWidth}）`)
   check(resized.windowWidth >= before.windowWidth, `窗口宽度不小于原来的下限（${before.windowWidth} → ${resized.windowWidth}）`)
   check(resized.windowHeight > before.windowHeight, `窗口高度跟着变大（${before.windowHeight} → ${resized.windowHeight}）`)
+  // 放大后包围盒变大，落点必须跟着收回工作区（早先只改窗口大小，右/下半个身子被裁掉）。
+  check(clipProblem(resized) === '', `放大到 150% 后宠物仍在工作区内（${clipProblem(resized) || 'ok'}）`)
 
   // 缩回到 50%：窗口下限让它不再变小，但宠物确实缩小了。
   status.pet_size = 50
@@ -313,18 +380,19 @@ async function main() {
   const shrunk = await snapshot()
   check(shrunk.petWidth === 100, `50% 档位下宠物宽 100（实际 ${shrunk.petWidth}）`)
   check(shrunk.windowWidth === 420, `窗口宽度保留下限 420（实际 ${shrunk.windowWidth}）`)
+  check(clipProblem(shrunk) === '', `缩小到 50% 后宠物仍在工作区内（${clipProblem(shrunk) || 'ok'}）`)
   status.pet_size = 100
   pushSettings()
   await sleep(1000)
 
   // --- 7. 抛射开关：关闭时松手定住 --------------------------------------
-  const mouse = (type, x, y) => send('Input.dispatchMouseEvent', {
+  const mouse = (type, x, y, clickCount = 1) => send('Input.dispatchMouseEvent', {
     type,
     x,
     y,
     button: 'left',
     buttons: type === 'mouseReleased' ? 0 : 1,
-    clickCount: 1,
+    clickCount,
     pointerType: 'mouse',
   })
   const hitboxCenter = () => evaluate(`(() => {
@@ -334,8 +402,13 @@ async function main() {
     return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
   })()`)
 
-  /** 快速甩一下（保证估算初速远超死区），返回松手后的窗口位移条数。 */
-  async function flingAndCountMoves() {
+  /**
+   * 快速甩一下（保证估算初速远超死区），返回**松手之后**宠物走过的像素总长。
+   *
+   * 不能用窗口 bounds 的帧数当代理：弹簧收敛尾巴与「真的在飞」都会打十几帧，
+   * 分不清 1px 抖动和横穿屏幕。这里在页面内用 rAF 采样宠物屏幕坐标累加位移。
+   */
+  async function flingAndMeasurePath() {
     const box = await hitboxCenter()
     if (!box)
       return -1
@@ -345,28 +418,72 @@ async function main() {
       await mouse('mouseMoved', box.x - (520 * step) / 12, box.y - (320 * step) / 12)
       await sleep(8)
     }
+    await evaluate(`(() => {
+      window.__petPath = []
+      const pet = document.querySelector('.dsh-pet')
+      const tick = () => {
+        const rect = pet.getBoundingClientRect()
+        window.__petPath.push([window.screenX + rect.x, window.screenY + rect.y, performance.now()])
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+      return true
+    })()`)
     await mouse('mouseReleased', box.x - 520, box.y - 320)
-    // 等弹簧把窗口追到目标：拖拽本身也会继续发 moveTo，先让它收敛再计飞行帧。
-    await sleep(700)
-    const atRelease = boundsTrace().length
-    await sleep(1400)
-    // 松手后的增量 = 飞行帧；关闭抛射时应当只有落位那一下。
-    return boundsTrace().length - atRelease
+    const releasedAt = await evaluate('performance.now()')
+    await sleep(1500)
+    const path = await evaluate('window.__petPath')
+    // 只算松手 150ms **之后**的位移：弹簧收敛尾巴（几像素）不算「飞」，
+    // 真抛射在这之后的 1 秒多里还要走成百上千像素。
+    const settled = path.filter(sample => sample[2] >= releasedAt + 150)
+    let distance = 0
+    for (let index = 1; index < settled.length; index++)
+      distance += Math.hypot(settled[index][0] - settled[index - 1][0], settled[index][1] - settled[index - 1][1])
+    return Math.round(distance)
   }
 
   status.throw_enabled = false
   pushSettings()
   await sleep(800)
-  const idleFlight = await flingAndCountMoves()
-  check(idleFlight >= 0, `抛射关闭时能完成一次拖拽（帧数 ${idleFlight}）`)
-  check(idleFlight <= 6, `抛射关闭时松手不飞行（松手后位移帧 ${idleFlight}，只允许落位那几下）`)
+  const idleFlight = await flingAndMeasurePath()
+  check(idleFlight >= 0, `抛射关闭时能完成一次拖拽（松手后位移 ${idleFlight}px）`)
+  check(idleFlight <= 8, `抛射关闭时松手不飞行（松手后位移 ${idleFlight}px，只允许舍入抖动）`)
 
   // 打开抛射后同样的手势必须飞出去（否则说明「关掉没飞」只是因为手势太轻）。
   status.throw_enabled = true
   pushSettings()
   await sleep(800)
-  const flying = await flingAndCountMoves()
-  check(flying > idleFlight + 10, `抛射开启时松手会飞行（关闭 ${idleFlight} 帧 / 开启 ${flying} 帧）`)
+  const flying = await flingAndMeasurePath()
+  check(flying > 300, `抛射开启时松手会飞行（关闭 ${idleFlight}px / 开启 ${flying}px）`)
+
+  // --- 8. 双击宠物：把宿主主界面带到前台 --------------------------------
+  //
+  // 上游语义是 `pet_show_main_window`（apps/desktop/src/pet/app.tsx:53-55），不是宠物自己
+  // 挥手。这里断言两件事：双击确实请求了唤起、单次点击不会（上游 app.test.tsx:54-58 同款）。
+  status.pet_size = 100
+  pushSettings()
+  await sleep(1000)
+  const dblBox = await hitboxCenter()
+  const doubleClick = async (clickCount) => {
+    await mouse('mouseMoved', dblBox.x, dblBox.y)
+    await sleep(120)
+    for (let index = 1; index <= clickCount; index++) {
+      await mouse('mousePressed', dblBox.x, dblBox.y, index)
+      await mouse('mouseReleased', dblBox.x, dblBox.y, index)
+      await sleep(40)
+    }
+    await sleep(500)
+  }
+
+  stdout = ''
+  await doubleClick(1)
+  check(showMainTrace().length === 0, `单击宠物不唤起宿主（实际 ${showMainTrace().length} 次）`)
+
+  stdout = ''
+  await doubleClick(2)
+  const doubleTap = showMainTrace()
+  check(doubleTap.length === 1, `双击宠物唤起宿主一次（实际 ${doubleTap.length} 次）`)
+  check(doubleTap[0] === '[show-main] dsh://open', `唤起目标是宿主下发的 open_url（实际「${doubleTap[0] ?? ''}」）`)
 
   socket.close()
 }
@@ -385,4 +502,4 @@ if (failures.length) {
     console.error(' -', line)
   process.exit(1)
 }
-console.log('\nOK: bubbles, stop-to-idle, live size and throw switch all behave')
+console.log('\nOK: bubbles, stop-to-idle, live size, throw switch, start corner and double-click all behave')

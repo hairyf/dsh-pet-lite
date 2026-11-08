@@ -25,6 +25,7 @@ import {
   PET_BASE_WIDTH,
   PET_BUBBLE_HEADROOM,
   PET_BUBBLE_MIN_WIDTH,
+  PET_EDGE_ALLOW,
   PET_SIZE_MAX,
   PET_SIZE_MIN,
 } from '../shared/constants'
@@ -39,6 +40,7 @@ import {
   throwStep,
   trimTrail,
 } from './physics'
+import { clampPetPosition, cornerPetPosition } from './placement'
 
 const params = new URLSearchParams(window.location.search)
 const ORIGIN = params.get('origin') ?? ''
@@ -75,6 +77,8 @@ interface PetBridge {
   /** 拖拽/飞行开关：让主进程期间保持可交互。 */
   setDragging: (dragging: boolean) => void
   setInteractive: (interactive: boolean) => void
+  /** 把宿主主界面带到前台（双击宠物；与菜单里的「显示主界面」同一语义）。 */
+  showMain: (openUrl: string) => void
   /** 弹出右键菜单（显示主界面 / 关闭宠物）。 */
   showMenu: (payload: { openUrl?: string, showLabel?: string, closeLabel?: string }) => void
   /** 订阅菜单点击。返回取消订阅函数。 */
@@ -164,8 +168,8 @@ async function fetchAsset(id: string): Promise<PetAsset> {
  *
  * 这是本文件最容易搞错的地方，因此写死约定：
  *   - `x` / `y`  = **宠物包围盒左上角**在屏幕上的位置（不是窗口位置，也不是窗口内坐标）；
- *   - 窗口位置 = 宠物位置 − `WINDOW_MARGIN`；
- *   - 宠物在窗口内的 DOM 偏移恒为 `WINDOW_MARGIN`，宠物移动时 DOM 不动、窗口动
+ *   - 窗口位置 = 宠物位置 − 窗口内偏移（`offsetRef`：左边留白/居中 + 上方气泡画布）；
+ *   - 宠物在窗口内的 DOM 偏移与 `offsetRef` 同源，宠物移动时 DOM 不动、窗口动
  *     （与 dsh-pet 的 sprite 固定在内边距、由 `sendBounds` 移动窗口完全一致）。
  *
  * 边界取自主进程下发的**工作区**（`AREA`），不是窗口自身尺寸 —— 后者只有几百 px，
@@ -280,6 +284,8 @@ function App(): React.ReactElement | null {
   }, [activeId])
 
   const sizePercent = normalizeSize(status?.pet_size)
+  /** 宿主状态是否已经到过（决定首次落位能不能按真实尺寸定锚）。 */
+  const hasStatus = status !== null
   /** 抛射开关（默认关闭）：关着时松手即定住，不做重力积分与撞边反弹。 */
   const throwEnabled = Boolean(status?.throw_enabled)
 
@@ -350,9 +356,12 @@ function App(): React.ReactElement | null {
   //
   // 位置全部收敛在 `viewRef`（屏幕坐标）：任何位移最后都经 `applyPosition` 落到窗口上。
   //
-  // 初值来自主进程下发的真实窗口位置：宠物包围盒左上角 = 窗口内容区左上角 + 垂直偏移。
+  // 初值来自主进程下发的真实窗口位置：宠物包围盒左上角 = 窗口内容区左上角 + 窗口内偏移。
   // 早期版本把「窗口内偏移（48）」当成屏幕坐标用，于是窗口被算到 `48-48=0` ——
   // 一拖动就跳到屏幕左上角，并且只能在那一片里挪。这就是那个 bug 的根。
+  //
+  // 这只是首帧的占位值（主进程建窗时按 100% 算的几何）；真实尺寸一到，下面的 effect
+  // 立刻按**实际宠物包围盒**重新落位。
   const viewRef = useRef<View>({
     x: WIN_X + petOffsetXFor(PET_BASE_WIDTH),
     y: WIN_Y + WINDOW_MARGIN + bubbleHeadroomFor(PET_BASE_WIDTH),
@@ -360,32 +369,45 @@ function App(): React.ReactElement | null {
     height: PET_BASE_WIDTH * PET_ASPECT,
   })
 
+  /**
+   * 是否已经「定锚」（默认角点只落一次，且必须按宿主给的真实尺寸落）。
+   *
+   * 首帧 `status` 还没到，只能按 100% 先摆；若此刻就算定锚，50% 档位会永远停在 100%
+   * 的角点上（窗口有最小气泡宽度，宠物居中后离右边缘几十像素，肉眼看就是「没贴角」）。
+   * 因此定锚条件是有真实尺寸、或用户自己动过手。
+   */
+  const anchoredRef = useRef(false)
+
   /** 宠物在窗口内的偏移（`applyPosition` 读它，必须与 DOM 偏移同源）。 */
   const offsetRef = useRef({ x: petOffsetX, y: petOffsetY })
   offsetRef.current = { x: petOffsetX, y: petOffsetY }
 
-  // 尺寸变化必须同步进几何：抛掷边界与弹簧目标都按它算，不更新会用到旧包围盒。
-  useEffect(() => {
-    viewRef.current.width = width
-    viewRef.current.height = height
-  }, [width, height])
-
   /**
-   * 尺寸变化 → 立刻把窗口改成新大小。
+   * 尺寸变化 → 改窗口大小，并把整只宠物重新夹回工作区。
    *
    * 这是「拖动大小滑条宠物不变」的修法：窗口尺寸**只由这里决定**（主进程不做百分比换算，
-   * 它不知道宠物素材自带的 `size`）。窗口位置也要跟着调 —— 气泡画布在宠物上方，
-   * 尺寸一变宠物包围盒的 y 就不该再贴着旧的离线位置。
+   * 它不知道宠物素材自带的 `size`）。
+   *
+   * 位置必须一起算：启动时宿主回来的 `pet_size` 晚于首帧，首帧按 100% 落过位；等尺寸变成
+   * 200% 时包围盒长大了，旧落点会把右 / 下半个身子顶到工作区外（被屏幕边缘裁掉）。
+   * 只用旧坐标改窗口大小就会留下这个状态 —— 位置和尺寸必须按同一份包围盒一起算。
    */
   useEffect(() => {
+    const view = viewRef.current
+    view.width = width
+    view.height = height
+    // 默认角点只在定锚前用：定锚后要么是用户拖过，要么只是尺寸变了，都只夹进工作区，
+    // 绝不把宠物搬回角上（否则拖完再改大小会突然弹回去）。
+    const placed = anchoredRef.current
+      ? clampPetPosition(view, width, height, AREA, PET_EDGE_ALLOW)
+      : cornerPetPosition(width, height, AREA, PET_EDGE_ALLOW)
+    if (hasStatus)
+      anchoredRef.current = true
+    view.x = placed.x
+    view.y = placed.y
     const size = windowSizeFor(width, height)
-    window.petBridge?.setBounds(
-      viewRef.current.x - offsetRef.current.x,
-      viewRef.current.y - offsetRef.current.y,
-      size.width,
-      size.height,
-    )
-  }, [width, height, petOffsetX, petOffsetY])
+    window.petBridge?.setBounds(placed.x - petOffsetX, placed.y - petOffsetY, size.width, size.height)
+  }, [width, height, petOffsetX, petOffsetY, hasStatus])
 
   const dragStateRef = useRef<DragState>({ active: false, dragging: false, sx: 0, sy: 0, petX: 0, petY: 0 })
   const dragTargetRef = useRef<DragTarget | null>(null)
@@ -399,7 +421,7 @@ function App(): React.ReactElement | null {
     const view = viewRef.current
     // 夹进工作区（与 dsh-pet 的 fitWindow 同义）：身体四周各留 24px 可挂出去，
     // 再往外就让用户够不到了 —— 只能看见宠物贴在屏幕外缘却拖不回来。
-    const clamp = throwBoundsIn(AREA, view.width, 24)
+    const clamp = throwBoundsIn(AREA, view.width, PET_EDGE_ALLOW)
     view.x = Math.round(Math.min(clamp.maxX, Math.max(clamp.minX, x)))
     view.y = Math.round(Math.min(clamp.maxY, Math.max(clamp.minY, y)))
     // 窗口 = 宠物包围盒 + 留白（上方另加气泡画布）。
@@ -465,7 +487,7 @@ function App(): React.ReactElement | null {
     let state: ThrowState = { x, y, vx, vy }
     let last = performance.now()
     // 边界取**工作区**（屏幕坐标），不是窗口自身尺寸。
-    const bounds: ThrowBounds = throwBoundsIn(AREA, viewRef.current.width, 24)
+    const bounds: ThrowBounds = throwBoundsIn(AREA, viewRef.current.width, PET_EDGE_ALLOW)
     const step = (): void => {
       if (throwRef.current?.token !== token)
         return
@@ -499,6 +521,8 @@ function App(): React.ReactElement | null {
       petY: view.y,
     }
     dragTrailRef.current = []
+    // 用户动手 = 位置归他管：之后尺寸变化只夹取，不再搬回默认角点。
+    anchoredRef.current = true
     stopThrow()
     stopDragFollow()
     // 【关键】拖拽期间窗口必须保持可交互，且主进程要知道「我正在用输入」。
@@ -605,6 +629,20 @@ function App(): React.ReactElement | null {
     })
   }, [status?.open_url])
 
+  /**
+   * 双击宠物 → 把宿主主界面带到前台。
+   *
+   * 与上游 `pet_show_main_window` 同一语义：用户在桌宠身上双击，期待的是「把 DSH 叫出来」，
+   * 不是宠物自己挥手。唤起目标就用宿主下发的 `open_url`（与右键菜单「显示主界面」同一条
+   * 路径）；宿主没给（纯浏览器宿主 / 独立运行）时什么也不做 —— 上游在这种环境下该命令
+   * 同样不可用，不能假装成功。
+   */
+  const onDoubleClick = useCallback(() => {
+    if (!status?.open_url)
+      return
+    window.petBridge?.showMain(status.open_url)
+  }, [status?.open_url])
+
   /** 菜单里选「关闭宠物」：写持久化设置，宿主随即注销窗口。 */
   const closePet = useCallback(async () => {
     try {
@@ -670,7 +708,7 @@ function App(): React.ReactElement | null {
         onHitboxPointerMove={onHitboxPointerMove}
         onHitboxPointerUp={endDrag}
         onHitboxPointerCancel={endDrag}
-        onDoubleClick={() => pet.motion({ type: 'waving' })}
+        onDoubleClick={onDoubleClick}
         onContextMenu={onContextMenu}
         onError={error => showError(`宠物素材加载失败：${messageOf(error)}`)}
       />
@@ -678,24 +716,7 @@ function App(): React.ReactElement | null {
   )
 }
 
-/**
- * 初始化：把窗口对齐到主进程下发的真实位置。
- *
- * 主进程用 `winX/winY/area*` 告诉我们窗口在哪、工作区多大，因此这里**不需要猜**：
- * 宠物包围盒左上角 = 窗口内容区左上角 + 垂直偏移，随后按该几何把窗口吸附一次
- * （主进程可能把它落在工作区边缘，吸附会把它夹回可视区）。
- *
- * 【不要再`setSize(100)`】早先这里硬编码 100%，把已经持久化的 `pet_size` 顶掉了 ——
- * 用户拖了滑条、重开窗口又变回 100%。尺寸**只由 App 里那条 effect**下发（它读的是宿主
- * 权威状态），这里只负责把窗口位置对齐到主进程给的坐标。
- */
-function seedWindow(): void {
-  const size = windowSizeFor(PET_BASE_WIDTH, PET_BASE_WIDTH * PET_ASPECT)
-  window.petBridge?.setBounds(WIN_X, WIN_Y, size.width, size.height)
-}
-
 const container = document.getElementById('root')
 if (!container)
   throw new Error('DSH_PET_LITE_LAYOUT_MISSING: #root was not found')
 createRoot(container).render(<App />)
-seedWindow()

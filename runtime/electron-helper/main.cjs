@@ -52,6 +52,16 @@ const CATALOG_URL = process.env.DSH_PET_LITE_CONFIG_URL || ''
 let ignoring = true
 
 /**
+ * 指针是否停在宠物身体上（渲染端 `pet:set-interactive` 上报的最近一次命中判定）。
+ *
+ * 【为什么主进程要记住它】拖拽结束、右键菜单关闭这两处都要「把窗口交还给命中判定」。
+ * 早期版本在这里无脑翻回穿透 —— 真人双击的两次点击之间手指是不动的，没有 `pointermove`
+ * 就没有下一次命中判定，窗口停在穿透态，**第二次点击直接落到下层窗口**，双击永远不成。
+ * 现在改为按最近一次悬停结果落位：指针还在宠物身上就保持可交互。
+ */
+let hovering = false
+
+/**
  * 唯一设置点击穿透的入口。
  *
  * `forward: true` 让窗口在被忽略时仍收到 mousemove —— 渲染端正是靠它判定「指针进了
@@ -77,14 +87,34 @@ function windowSize(sizePercent) {
   }
 }
 
+/** 宠物本体在窗口内的偏移（与渲染端 `petOffsetXFor` / `petOffsetY` 同源）。 */
+function petOffset(sizePercent) {
+  const petWidth = Math.round((PET_BASE_WIDTH * sizePercent) / 100)
+  const petHeight = Math.round((petWidth * 9) / 16)
+  const { width } = windowSize(sizePercent)
+  return {
+    petWidth,
+    petHeight,
+    x: Math.round((width - petWidth) / 2),
+    y: WINDOW_MARGIN + Math.round((BUBBLE_HEADROOM * petWidth) / PET_BASE_WIDTH),
+  }
+}
+
 function createWindow() {
   const { workArea } = screen.getPrimaryDisplay()
   const { width, height } = windowSize(100)
+  const offset = petOffset(100)
 
   // 初始落在主屏右下角（与上游默认 corner=bottom-right 一致）。
+  //
+  // 落点按**宠物本体**算、不按窗口算：窗口四周有透明留白（左右各 48、上方气泡画布），
+  // 拿窗口贴边会让宠物本体位置随留白漂移，宠物一大就整块顶出工作区。
+  // 渲染端加载后会按宿主下发的真实尺寸重新落位，这里只保证「首帧就在该在的地方」。
+  const petX = workArea.x + workArea.width - offset.petWidth - 24
+  const petY = workArea.y + workArea.height - offset.petHeight - 24
   // 注意这是**窗口**左上角；渲染端拿到的是窗口内容区左上角，两者相差一个边框（无边框窗口为 0）。
-  const initialX = workArea.x + workArea.width - width - 24
-  const initialY = workArea.y + workArea.height - height - 24
+  const initialX = petX - offset.x
+  const initialY = petY - offset.y
 
   const created = new BrowserWindow({
     width,
@@ -206,10 +236,43 @@ ipcMain.on('pet:set-bounds', (event, bounds) => {
 
 /** 渲染端在指针进/出宠物命中区时翻转可交互性。 */
 ipcMain.on('pet:set-interactive', (event, interactive) => {
+  hovering = Boolean(interactive)
   const target = BrowserWindow.fromWebContents(event.sender)
   if (!target || target.isDestroyed())
     return
-  setWindowIgnore(target, !interactive)
+  setWindowIgnore(target, !hovering)
+})
+
+// --- 唤起宿主 ----------------------------------------------------------
+
+/**
+ * 「显示主界面」的唯一实现：交给注册了 `open_url` 协议 / 地址的宿主。
+ *
+ * 双击宠物与右键菜单里的同名项共用这一条路径 —— 语义对齐上游 `pet_show_main_window`
+ * （把宿主主窗口带到前台），而不是在桌宠窗口里打开页面：这个窗口是点击穿透的浮动层，
+ * 既没有地址栏也没有返回路径，一旦导航过去就再也回不到宠物。
+ *
+ * 空 `open_url`（纯浏览器宿主、独立运行）时返回 false，调用方据此不做任何事 ——
+ * 上游在这种环境下同样是「命令不可用」，不假装成功。
+ */
+function showMainWindow(openUrl) {
+  if (typeof openUrl !== 'string' || !openUrl)
+    return false
+  // 验证脚本用 `DSH_PET_LITE_SUPPRESS_LAUNCH=1` 只走「记录」不走「交棒」：
+  // `shell.openExternal` 会在没有该协议处理器的机器上弹「打开方式」，在有的机器上把真宿主
+  // 抢到前台 —— 两种情况都会打断紧接着的手势断言。产品运行时不设这个变量。
+  if (process.env.DSH_PET_LITE_SUPPRESS_LAUNCH === '1') {
+    process.stdout.write(`[show-main] ${openUrl}\n`)
+    return true
+  }
+  // 走系统协议：由注册了该协议的宿主把主窗口带到前台。
+  void shell.openExternal(openUrl).catch(() => {})
+  return true
+}
+
+// 双击宠物 → 唤起宿主（上游 `pet_show_main_window`）。
+ipcMain.on('pet:show-main', (_event, payload) => {
+  showMainWindow(typeof payload?.openUrl === 'string' ? payload.openUrl : '')
 })
 
 // --- 右键菜单 ----------------------------------------------------------
@@ -218,7 +281,8 @@ ipcMain.on('pet:set-interactive', (event, interactive) => {
  * 桌宠右键菜单：显示主界面 / 关闭宠物。
  *
  * 与 Tauri 桌面端 `pet_show_context_menu`（`bridge/pet.rs`）同一组项、同一语义：
- *   - **显示主界面** → 打开 `dsh://open`。这是官方桌面端注册并处理的协议
+ *   - **显示主界面** → 打开 `dsh://open`（与双击宠物同一条路径，见 showMainWindow）。
+ *     这是官方桌面端注册并处理的协议
  *     （`desktop/deep_link.rs` 的 `is_open_request` 精确匹配 `dsh://open` 与
  *     `dsh://open/`），所以用系统协议唤起，不自己去翻窗口句柄 —— 官方桌面端、
  *     以及任何注册了该协议的宿主都能接住。
@@ -241,8 +305,7 @@ ipcMain.on('pet:show-menu', (event, payload) => {
     template.push({
       label: payload?.showLabel ?? '显示主界面',
       click: () => {
-        // 走系统协议：由注册了该协议的宿主把主窗口带到前台。
-        void shell.openExternal(openUrl).catch(() => {})
+        showMainWindow(openUrl)
       },
     })
   }
@@ -259,7 +322,7 @@ ipcMain.on('pet:show-menu', (event, payload) => {
     // 拖拽中不翻穿透（`dragging` 由下面的 pet:set-dragging 维护）。
     callback: () => {
       if (!target.isDestroyed() && !isDragging())
-        setWindowIgnore(target, true)
+        setWindowIgnore(target, !hovering)
     },
   })
 })
@@ -291,8 +354,9 @@ ipcMain.on('pet:set-dragging', (event, value) => {
     setWindowIgnore(target, false)
     return
   }
-  // 拖拽结束：交还给命中判定（下一次 pointermove 会重新算）。
-  setWindowIgnore(target, true)
+  // 拖拽结束：交还给命中判定 —— 用最近一次悬停结果，不能无脑翻回穿透。
+  // 双击的第二次点击前通常没有 pointermove，翻了就再也翻不回来（见 hovering 注释）。
+  setWindowIgnore(target, !hovering)
 })
 
 /**
