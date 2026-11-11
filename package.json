@@ -1,7 +1,7 @@
 {
   "name": "dsh-pet-lite",
   "type": "module",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "packageManager": "pnpm@11.15.1",
   "description": "Lightweight, self-contained desktop pet for DeepSeek Harness — an in-app floating pet driven by session activity, a settings panel, and a transparent always-on-top window that reuses the DSH host's Electron runtime (path resolution mirrors dsh-pet).",
   "author": "Hairy <wwu710632@gmail.com>",
@@ -71,7 +71,7 @@
     "start": "Run the entry file",
     "test": "Run the test suite",
     "typecheck": "Check types",
-    "prepare": "Set up git hooks and skills"
+    "prepare": "Set up git hooks"
   },
   "dependencies": {
     "@electron-internal/extract-zip": "catalog:",
@@ -139,7 +139,6 @@
     "react": "catalog:runtime",
     "react-dom": "catalog:runtime",
     "simple-git-hooks": "catalog:cli",
-    "skills-npm": "catalog:cli",
     "tinyexec": "catalog:",
     "tsdown": "catalog:cli",
     "tsx": "catalog:cli",
