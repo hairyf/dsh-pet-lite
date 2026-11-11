@@ -42,12 +42,14 @@ export function apply(ctx: Context): void {
   const openDesktop = async (): Promise<void> => {
     if (desktopOpen)
       return
-    if (!desktopSupported())
-      throw new Error('PET_DESKTOP_UNAVAILABLE: no usable Electron runtime')
+    if (!hasGraphicalDisplay())
+      throw new Error('PET_DESKTOP_UNAVAILABLE: no graphical display is available')
     const port = ctx.webServer.port ?? 0
     if (!port || port <= 0)
       throw new Error('PET_WEB_PORT_UNAVAILABLE: web server is not listening yet')
-    const electronPath = await ensureElectronDownload() ?? resolveElectronPath()
+    // 先复用（宿主注入 / 已有落地），确实没有才下载。反过来做会让「有 Electron 却排在
+    // 下载后面」和「没有 Electron 时先被 gate 拦下、下载永远跑不到」两种错法同时成立。
+    const electronPath = resolveElectronPath() ?? await ensureElectronDownload()
     if (!electronPath)
       throw new Error('PET_DESKTOP_UNAVAILABLE: no usable Electron runtime')
     const process_ = new HelperProcess(
@@ -127,9 +129,14 @@ export function apply(ctx: Context): void {
   }, `${PLUGIN_ID}: routes`)
 
   // 启动时把「上次退出前是启用态」的桌宠拉起来。
+  //
+  // 这里**不**先用 `desktopSupported()` 判门：桌面能力可以现取（本机已有、宿主注入，或由
+  // `ensureElectronDownload` 下载）。先判门会让「本机还没有 Electron」的桌面用户永远等不到
+  // 那次下载，症状是「设置里开着、日志里什么都没有」。真正做不到的情况由 `openDesktop` 抛错，
+  // 下面的日志会把原因说出来。
   ctx.effect(() => {
     const status = snapshot({ desktopSupported: desktopSupported(), desktopOpen: false })
-    if (status.enabled && status.active_pet !== '' && status.desktop_supported) {
+    if (status.enabled && status.active_pet !== '') {
       void openDesktop().catch((error: unknown) => {
         ctx.logger?.warn?.(`dsh-pet-lite: desktop window not opened: ${error instanceof Error ? error.message : String(error)}`)
       })

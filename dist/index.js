@@ -54,22 +54,47 @@ function defaultElectronExe() {
 	return join(electronLandingDir(), ELECTRON_REL);
 }
 /**
+* 当前进程是否正是「以 Node 模式运行的宿主 Electron」。
+*
+* dsh-tauri 把随包 Electron 同时用作 UI 与 dsh 内核：内核进程就是那个二进制，环境里带
+* `ELECTRON_RUN_AS_NODE=1`、`DSH_NODE` 也指向它自己。此时 `DSH_NODE === process.execPath`
+* 是**正常的宿主注入**，不是自举。
+*/
+function runningAsNodeModeHost() {
+	return process.env.ELECTRON_RUN_AS_NODE === "1";
+}
+/**
+* 宿主这份 Electron 是不是「打包过的应用」。
+*
+* 打包后的 Electron 把应用整体塞进 `resources/app.asar`，命令行上再给脚本也不会被当成
+* 入口 —— 它只会启动那个应用。复用这种二进制等于多开一个宿主窗口，桌宠依旧不出现，
+* 所以必须退回自下载的通用 Electron。
+*/
+function packagedElectronHost() {
+	const resources = process.resourcesPath;
+	return typeof resources === "string" && resources !== "" && existsSync(join(resources, "app.asar"));
+}
+/**
 * 宿主注入的 Electron 路径候选。
 *
 * `DSH_ELECTRON_PATH` 是本插件自己的显式约定；`DSH_NODE` 是 dsh-tauri 桌面端已有的注入
 * （它指向「随包 Electron」，桌面端用它以 `ELECTRON_RUN_AS_NODE=1` 跑 dsh 内核）。
 *
-* 【为什么必须排除「正在运行的自己」】若宿主把 `DSH_NODE` 指向当前进程的 `process.execPath`
-* 且当前进程就是那个 Electron（桌宠 helper 自己再拉起 helper），会把同一个二进制当成
+* 【为什么排除「正在运行的自己」】若桌宠 helper 自己再拉起 helper，会把同一个二进制当成
 * 「可复用的宿主 Electron」递归使用 —— 它缺少 Node 模式的 wrapper，行为不可预期。
-* 因此候选只接受**已存在且不是当前 `process.execPath`** 的路径。
+* 但判据不能只看路径相等：dsh-tauri 下当前进程本来就是宿主 Electron（Node 模式），
+* 路径相等恰恰证明「机器上已经有一个能用的 Electron」，排除它只会让桌面端白白再下几百 MB。
+* 自举场景由 `ELECTRON_RUN_AS_NODE` 区分（helper 子进程的环境已由 `helperChildEnv` 摘掉它），
+* 打包应用再按 `resources/app.asar` 排除，因此这里的放宽不会让 helper 复用自己、
+* 也不会把「官方桌面端的壳」当成通用 Electron 拉起来。
 */
 function hostInjectedCandidates() {
 	const list = [];
+	const reuseSelfPath = runningAsNodeModeHost() && !packagedElectronHost();
 	const push = (value) => {
 		const trimmed = value?.trim();
 		if (!trimmed || !existsSync(trimmed)) return;
-		if (resolve(trimmed) === resolve(process.execPath)) return;
+		if (!reuseSelfPath && resolve(trimmed) === resolve(process.execPath)) return;
 		list.push(trimmed);
 	};
 	push(process.env.DSH_ELECTRON_PATH);
@@ -2093,9 +2118,15 @@ const patchRoute = {
 		sendJson(res, 200, status);
 	}
 };
-/** 把桌面窗口对齐到「该不该在」。 */
+/**
+* 把桌面窗口对齐到「该不该在」。
+*
+* 不在这里先看 `desktopSupported`：那个值说的是「此刻本机解析得到 Electron」，而开窗本身
+* 会先复用宿主注入 / 已有落地、再按需下载。用它当闸门会让「还没有 Electron 的桌面端」
+* 启用后拿到 200 + 空动作 —— 正是 issue #2 里「设置了、启用了、什么都没发生」的另一半。
+* 真开不起来时 `setDesktop` 会抛错，由调用方回 502 让前端显示失败。
+*/
 async function syncDesktop(ctx, shouldOpen) {
-	if (!ctx.desktopSupported) return;
 	if (shouldOpen === ctx.desktopOpen) return;
 	await ctx.setDesktop(shouldOpen);
 }
@@ -2496,10 +2527,10 @@ function apply(ctx) {
 	const origin = () => `http://127.0.0.1:${ctx.webServer.port ?? 0}`;
 	const openDesktop = async () => {
 		if (desktopOpen) return;
-		if (!desktopSupported()) throw new Error("PET_DESKTOP_UNAVAILABLE: no usable Electron runtime");
+		if (!hasGraphicalDisplay()) throw new Error("PET_DESKTOP_UNAVAILABLE: no graphical display is available");
 		const port = ctx.webServer.port ?? 0;
 		if (!port || port <= 0) throw new Error("PET_WEB_PORT_UNAVAILABLE: web server is not listening yet");
-		const electronPath = await ensureElectronDownload() ?? resolveElectronPath();
+		const electronPath = resolveElectronPath() ?? await ensureElectronDownload();
 		if (!electronPath) throw new Error("PET_DESKTOP_UNAVAILABLE: no usable Electron runtime");
 		const process_ = new HelperProcess({
 			electronPath,
@@ -2569,7 +2600,7 @@ function apply(ctx) {
 			desktopSupported: desktopSupported(),
 			desktopOpen: false
 		});
-		if (status.enabled && status.active_pet !== "" && status.desktop_supported) openDesktop().catch((error) => {
+		if (status.enabled && status.active_pet !== "") openDesktop().catch((error) => {
 			ctx.logger?.warn?.(`dsh-pet-lite: desktop window not opened: ${error instanceof Error ? error.message : String(error)}`);
 		});
 		return () => {

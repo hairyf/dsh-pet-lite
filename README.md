@@ -62,6 +62,7 @@ dsh plugin --profile web add dsh-pet-lite
 - **GitHub 限流**：登记与更新检查走 GitHub API，匿名额度是 60 次/小时/IP；设 `GITHUB_TOKEN` 或 `GH_TOKEN` 可换 5000 次/小时。
 - **仓库登记**：只认 `raw.githubusercontent.com`，`kind` 必须为 `dsh`；只登记资源地址，不下载视频包。
 - **数据位置**：`$DSH_HOME/pet-lite/`，设置与已登记仓库都在这里。
+- **Electron 运行时**：优先复用宿主自带的 Electron（dsh-tauri 桌面端），没有时自动下载到 `$DSH_HOME/electron`；两者都拿不到才会在启用时报错，不再静默。
 - **Wayland**：桌宠窗口来自 Electron，不是 X11/Wayland 原生窗口，设置里的强制 XWayland 开关不适用。
 
 ## 🛠️ 开发与贡献

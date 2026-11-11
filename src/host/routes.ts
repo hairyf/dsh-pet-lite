@@ -165,10 +165,15 @@ const patchRoute: Route = {
   },
 }
 
-/** 把桌面窗口对齐到「该不该在」。 */
+/**
+ * 把桌面窗口对齐到「该不该在」。
+ *
+ * 不在这里先看 `desktopSupported`：那个值说的是「此刻本机解析得到 Electron」，而开窗本身
+ * 会先复用宿主注入 / 已有落地、再按需下载。用它当闸门会让「还没有 Electron 的桌面端」
+ * 启用后拿到 200 + 空动作 —— 正是 issue #2 里「设置了、启用了、什么都没发生」的另一半。
+ * 真开不起来时 `setDesktop` 会抛错，由调用方回 502 让前端显示失败。
+ */
 async function syncDesktop(ctx: RouteContext, shouldOpen: boolean): Promise<void> {
-  if (!ctx.desktopSupported)
-    return
   if (shouldOpen === ctx.desktopOpen)
     return
   await ctx.setDesktop(shouldOpen)

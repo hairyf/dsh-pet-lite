@@ -65,23 +65,53 @@ export function defaultElectronExe(): string {
 }
 
 /**
+ * 当前进程是否正是「以 Node 模式运行的宿主 Electron」。
+ *
+ * dsh-tauri 把随包 Electron 同时用作 UI 与 dsh 内核：内核进程就是那个二进制，环境里带
+ * `ELECTRON_RUN_AS_NODE=1`、`DSH_NODE` 也指向它自己。此时 `DSH_NODE === process.execPath`
+ * 是**正常的宿主注入**，不是自举。
+ */
+function runningAsNodeModeHost(): boolean {
+  return process.env.ELECTRON_RUN_AS_NODE === '1'
+}
+
+/**
+ * 宿主这份 Electron 是不是「打包过的应用」。
+ *
+ * 打包后的 Electron 把应用整体塞进 `resources/app.asar`，命令行上再给脚本也不会被当成
+ * 入口 —— 它只会启动那个应用。复用这种二进制等于多开一个宿主窗口，桌宠依旧不出现，
+ * 所以必须退回自下载的通用 Electron。
+ */
+function packagedElectronHost(): boolean {
+  // `resourcesPath` 只有 Electron 运行时才注入，@types/node 的 Process 上没有它。
+  const resources = (process as { resourcesPath?: string }).resourcesPath
+  return typeof resources === 'string' && resources !== '' && existsSync(join(resources, 'app.asar'))
+}
+
+/**
  * 宿主注入的 Electron 路径候选。
  *
  * `DSH_ELECTRON_PATH` 是本插件自己的显式约定；`DSH_NODE` 是 dsh-tauri 桌面端已有的注入
  * （它指向「随包 Electron」，桌面端用它以 `ELECTRON_RUN_AS_NODE=1` 跑 dsh 内核）。
  *
- * 【为什么必须排除「正在运行的自己」】若宿主把 `DSH_NODE` 指向当前进程的 `process.execPath`
- * 且当前进程就是那个 Electron（桌宠 helper 自己再拉起 helper），会把同一个二进制当成
+ * 【为什么排除「正在运行的自己」】若桌宠 helper 自己再拉起 helper，会把同一个二进制当成
  * 「可复用的宿主 Electron」递归使用 —— 它缺少 Node 模式的 wrapper，行为不可预期。
- * 因此候选只接受**已存在且不是当前 `process.execPath`** 的路径。
+ * 但判据不能只看路径相等：dsh-tauri 下当前进程本来就是宿主 Electron（Node 模式），
+ * 路径相等恰恰证明「机器上已经有一个能用的 Electron」，排除它只会让桌面端白白再下几百 MB。
+ * 自举场景由 `ELECTRON_RUN_AS_NODE` 区分（helper 子进程的环境已由 `helperChildEnv` 摘掉它），
+ * 打包应用再按 `resources/app.asar` 排除，因此这里的放宽不会让 helper 复用自己、
+ * 也不会把「官方桌面端的壳」当成通用 Electron 拉起来。
  */
 export function hostInjectedCandidates(): string[] {
   const list: string[] = []
+  // 路径等于 `process.execPath` 只有在这两件事都成立时才是安全信号：当前进程是 Node 模式的
+  // 宿主内核，且那个二进制是通用 Electron（不是打包应用）。否则它可能是 helper 自己。
+  const reuseSelfPath = runningAsNodeModeHost() && !packagedElectronHost()
   const push = (value: string | undefined): void => {
     const trimmed = value?.trim()
     if (!trimmed || !existsSync(trimmed))
       return
-    if (resolve(trimmed) === resolve(process.execPath))
+    if (!reuseSelfPath && resolve(trimmed) === resolve(process.execPath))
       return
     list.push(trimmed)
   }

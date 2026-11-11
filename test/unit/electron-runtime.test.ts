@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   defaultElectronExe,
@@ -22,6 +25,9 @@ const ENV_KEYS = [
   'DSH_ELECTRON_PATH',
   'DSH_NODE',
   'DSH_PET_ELECTRON_PATH',
+  // 宿主形态开关：dsh-tauri 的内核进程带它，GUI 里的 helper 不带。用例必须显式控制，
+  // 否则跑测试的那个进程是什么形态，断言就跟着变。
+  'ELECTRON_RUN_AS_NODE',
 ] as const
 
 const saved = new Map<string, string | undefined>()
@@ -63,6 +69,45 @@ describe('resolveElectronPath', () => {
     process.env.DSH_ELECTRON_PATH = '/definitely/missing-host-electron'
     process.env.DSH_NODE = '/also/missing/host-node'
     expect(resolveElectronPath()).toBeUndefined()
+  })
+
+  /**
+   * dsh-tauri 的宿主注入：内核就是随包 Electron（`ELECTRON_RUN_AS_NODE=1`），
+   * `DSH_NODE` / `DSH_ELECTRON_PATH` 都指向它自己。
+   *
+   * 此时「路径等于 process.execPath」证明的恰恰是「机器上有一个能用的 Electron」；
+   * 排除它会让桌面端白白再下载几百 MB，症状是启用后窗口始终不出现（issue #2）。
+   */
+  it('accepts a host-injected path equal to the current executable in node-mode hosts', () => {
+    process.env.ELECTRON_RUN_AS_NODE = '1'
+    process.env.DSH_NODE = process.execPath
+    expect(resolveElectronPath()).toBe(process.execPath)
+    expect(resolveElectronPath([process.execPath])).toBe(process.execPath)
+  })
+
+  /** 反过来：GUI 里的 helper 再拉起自己才是真自举，必须继续排除。 */
+  it('still ignores the current executable when the host is not in node mode', () => {
+    process.env.DSH_NODE = process.execPath
+    expect(resolveElectronPath()).toBeUndefined()
+  })
+
+  /**
+   * 打包应用（`resources/app.asar`）不是通用 Electron：给它脚本它也只会启动自己。
+   * 这类宿主即使也是 Node 模式，也必须退回自下载的 Electron。
+   */
+  it('ignores a packaged host binary even in node mode', () => {
+    const resources = mkdtempSync(join(tmpdir(), 'dsh-pet-lite-packaged-'))
+    writeFileSync(join(resources, 'app.asar'), '')
+    Object.defineProperty(process, 'resourcesPath', { value: resources, configurable: true })
+    try {
+      process.env.ELECTRON_RUN_AS_NODE = '1'
+      process.env.DSH_ELECTRON_PATH = process.execPath
+      expect(resolveElectronPath()).toBeUndefined()
+    }
+    finally {
+      delete (process as { resourcesPath?: string }).resourcesPath
+      rmSync(resources, { recursive: true, force: true })
+    }
   })
 })
 
